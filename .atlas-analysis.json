@@ -1,0 +1,109 @@
+{
+  "projectType": "general",
+  "projectName": "Portix OS",
+  "projectDescription": "A high-performance x86_64 kernel written in Rust from scratch with custom bootloader, Buddy System memory management, and VFS architecture.",
+  "theme": "aspen",
+  "primaryColor": "#848c8e",
+  "lightColor": "#11161e",
+  "darkColor": "#cfd0d2",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/boot-process",
+              "architecture/memory-management",
+              "architecture/interrupt-handling"
+            ]
+          },
+          {
+            "group": "Core Components",
+            "pages": [
+              "core/drivers",
+              "core/filesystem",
+              "core/graphics",
+              "core/console"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/building",
+              "development/testing",
+              "development/contributing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Memory Management",
+            "pages": [
+              "api/memory/buddy-allocator",
+              "api/memory/heap"
+            ]
+          },
+          {
+            "group": "Drivers",
+            "pages": [
+              "api/drivers/storage",
+              "api/drivers/input",
+              "api/drivers/bus"
+            ]
+          },
+          {
+            "group": "Graphics & UI",
+            "pages": [
+              "api/graphics/framebuffer",
+              "api/graphics/rendering",
+              "api/ui/tabs"
+            ]
+          },
+          {
+            "group": "System",
+            "pages": [
+              "api/system/arch",
+              "api/system/time"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Custom bootloader jumping directly to 64-bit Long Mode",
+    "Buddy System Allocator with intrusive lists for efficient memory management",
+    "ATA driver with intelligent caching and support for ISO9660 and FAT32",
+    "High-performance VESA framebuffer with alpha blending",
+    "Unified VFS layer abstracting filesystem operations",
+    "PS/2 keyboard and mouse support",
+    "PCI and ACPI bus scanning",
+    "Terminal with custom UI and tab system"
+  ],
+  "publicApiSurface": [
+    "BuddyAllocator - O(log N) memory allocation with buddy system",
+    "AtaBus - ATA/IDE bus driver with caching",
+    "Fat32Volume - FAT32 filesystem implementation",
+    "VFS - Virtual filesystem abstraction layer",
+    "Console - Framebuffer graphics console",
+    "KeyboardState - PS/2 keyboard driver",
+    "MouseState - PS/2 mouse driver",
+    "PciBus - PCI bus enumeration",
+    "Terminal - Interactive command-line terminal",
+    "IDT - Interrupt descriptor table management",
+    "PIT - Programmable interval timer"
+  ]
+}
