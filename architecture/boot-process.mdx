@@ -1,0 +1,588 @@
+---
+title: 'Boot Process'
+description: 'BIOS boot sequence and mode transitions in Portix OS'
+icon: 'rocket'
+---
+
+## Overview
+
+Portix OS implements a **two-stage bootloader** that transitions the CPU from 16-bit Real Mode through 32-bit Protected Mode to 64-bit Long Mode before jumping to the Rust kernel. This page documents the complete boot sequence with actual code from the bootloader.
+
+<Warning>
+  The bootloader must fit within strict size constraints: Stage 1 is exactly 512 bytes (one sector), and Stage 2 is 64 sectors (32 KB).
+</Warning>
+
+## Boot Stages
+
+```mermaid
+graph LR
+    A[BIOS POST] --> B[Stage 1<br/>0x7C00]
+    B --> C[Stage 2<br/>0x8000]
+    C --> D[Kernel<br/>0x10000]
+    D --> E[Rust Entry<br/>rust_main]
+    
+    style B fill:#ff6b6b
+    style C fill:#ffa500
+    style D fill:#4ecdc4
+    style E fill:#45b7d1
+```
+
+## Stage 1: Boot Sector (boot.asm)
+
+### Purpose
+
+The Stage 1 bootloader is loaded by the BIOS at physical address `0x7C00` and must:
+
+1. Set up a minimal execution environment (segments, stack)
+2. Detect disk geometry (LBA vs CHS)
+3. Load Stage 2 from disk (64 sectors starting at LBA 1)
+4. Transfer control to Stage 2 at `0x8000`
+
+### Initialization
+
+The bootloader begins by establishing a clean environment:
+
+```asm boot/boot.asm
+BITS 16
+ORG 0x7C00
+
+STAGE2_SECTORS equ 64
+STAGE2_SEG     equ 0x0800    ; physical 0x8000
+BASE_LBA_ADDR  equ 0x7E00    ; dword, written before jump
+
+start:
+    ; ── Establish segments FIRST, THEN save SI ──────────
+    cli
+    xor  ax, ax
+    mov  ds, ax
+    mov  es, ax
+    mov  ss, ax
+    mov  sp, 0x7C00
+    sti
+
+    ; Now DS=0, safe to save DL and SI
+    mov  [boot_drive_orig], dl
+    mov  [boot_drive],      dl
+    mov  [saved_si], si           ; SI points to partition entry
+```
+
+<Note>
+  The BIOS passes the boot drive number in `DL` and a pointer to the partition table entry in `DS:SI`. Portix preserves both for later use.
+</Note>
+
+### Disk Detection
+
+Stage 1 tries multiple strategies to read Stage 2:
+
+<AccordionGroup>
+  <Accordion title="Strategy A: LBA with Original Drive" icon="1">
+    Use INT 13h Extensions (LBA mode) with the drive number passed by BIOS:
+    
+    ```asm boot/boot.asm
+    ; ── A) LBA with drive original ──────────────────────────
+    mov  ah, 0x41
+    mov  bx, 0x55AA
+    mov  dl, [boot_drive]
+    int  0x13
+    jc   .try_lba_80
+    cmp  bx, 0xAA55
+    jne  .try_lba_80
+    jmp  .do_lba
+    ```
+  </Accordion>
+
+  <Accordion title="Strategy B: LBA with 0x80 (Fallback)" icon="2">
+    If the original drive doesn't support LBA, try drive 0x80 (first hard disk):
+    
+    ```asm boot/boot.asm
+    .try_lba_80:
+        cmp  byte [boot_drive_orig], 0x80
+        je   .use_chs
+        mov  ah, 0x41
+        mov  bx, 0x55AA
+        mov  dl, 0x80
+        int  0x13
+        jc   .use_chs
+        cmp  bx, 0xAA55
+        jne  .use_chs
+        mov  byte [boot_drive], 0x80
+    ```
+  </Accordion>
+
+  <Accordion title="Strategy C: CHS (Legacy)" icon="3">
+    Fall back to CHS (Cylinder-Head-Sector) mode for old BIOS without LBA support:
+    
+    ```asm boot/boot.asm
+    .use_chs:
+        mov  dl, [boot_drive_orig]
+        mov  [boot_drive], dl
+
+        mov  eax, [BASE_LBA_ADDR]
+        inc  eax
+        cmp  eax, 0xFFFF
+        ja   disk_error
+        mov  [current_lba], ax
+
+        ; Convert LBA to CHS and read sector by sector
+        mov  ax, [current_lba]
+        call lba_to_chs_hd
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### LBA Read with DAP
+
+When using LBA mode, Stage 1 fills a **Disk Address Packet (DAP)**:
+
+```asm boot/boot.asm
+.do_lba:
+    ; LBA physical of stage2 = base_lba + 1
+    mov  eax, [BASE_LBA_ADDR]
+    add  eax, 1
+    ; ── Fill DAP correctly ────────────────────────────────
+    ; Format: size(1) res(1) count(2) offset(2) segment(2) lba_lo(4) lba_hi(4)
+    mov  word  [dap_count],   STAGE2_SECTORS
+    mov  word  [dap_offset],  0x0000
+    mov  word  [dap_segment], STAGE2_SEG
+    mov  [dap_lba_lo], eax
+    mov  dword [dap_lba_hi],  0
+
+    mov  si, dap
+    mov  ah, 0x42
+    mov  dl, [boot_drive]
+    int  0x13
+    jnc  .loaded
+```
+
+The DAP structure is defined as:
+
+```asm boot/boot.asm
+dap:
+    db 0x10, 0x00           ; size=16, reserved=0
+dap_count:   dw 0          ; number of sectors
+dap_offset:  dw 0          ; offset in segment
+dap_segment: dw 0          ; segment to load into
+dap_lba_lo:  dd 0          ; LBA low 32 bits
+dap_lba_hi:  dd 0          ; LBA high 32 bits
+```
+
+### Jump to Stage 2
+
+Once Stage 2 is loaded at `0x8000`, control is transferred:
+
+```asm boot/boot.asm
+.loaded:
+    mov  dl, [boot_drive_orig]
+    jmp  0x0000:0x8000
+```
+
+<Info>
+  Stage 1 passes the boot drive number in `DL` and the partition's base LBA at `[0x7E00]` to Stage 2.
+</Info>
+
+## Stage 2: Mode Transition (stage2.asm)
+
+### Purpose
+
+Stage 2 performs the complex transition from 16-bit Real Mode to 64-bit Long Mode:
+
+<Steps>
+  <Step title="Long Mode Check">
+    Verify CPU supports 64-bit mode via CPUID
+  </Step>
+  <Step title="A20 Line">
+    Enable the A20 gate to access memory above 1 MB
+  </Step>
+  <Step title="Memory Map">
+    Collect memory map via INT 15h/E820h
+  </Step>
+  <Step title="Load Kernel">
+    Read kernel binary from disk into memory at 0x10000
+  </Step>
+  <Step title="VESA Setup">
+    Initialize graphics mode (1024x768 or best available)
+  </Step>
+  <Step title="Paging">
+    Set up identity paging for first 1 GB
+  </Step>
+  <Step title="Disable IDE IRQs">
+    Prevent IDE interrupts during transition
+  </Step>
+  <Step title="PIC Remap">
+    Remap PIC to avoid conflicts with CPU exceptions
+  </Step>
+  <Step title="Enter Long Mode">
+    Enable PAE, load GDT, set EFER.LME, enable paging
+  </Step>
+  <Step title="Jump to Kernel">
+    Far jump to 64-bit kernel entry point
+  </Step>
+</Steps>
+
+### Long Mode Check
+
+```asm boot/stage2.asm
+check_long_mode:
+    pushfd
+    pop  eax
+    mov  ecx, eax
+    xor  eax, (1 << 21)    ; Flip CPUID bit
+    push eax
+    popfd
+    pushfd
+    pop  eax
+    push ecx
+    popfd
+    xor  eax, ecx
+    jnz  .has_cpuid
+    ; ... error handling ...
+.has_cpuid:
+    mov  eax, 0x80000000
+    cpuid
+    cmp  eax, 0x80000001
+    jae  .has_ext
+    ; ... error handling ...
+.has_ext:
+    mov  eax, 0x80000001
+    cpuid
+    test edx, (1 << 29)    ; Check LM bit
+    jnz  .lm_ok
+    ; ... error handling ...
+.lm_ok:
+    ret
+```
+
+### A20 Gate Activation
+
+The A20 line must be enabled to access memory beyond 1 MB:
+
+```asm boot/stage2.asm
+; Try BIOS method first
+mov ax, 0x2401
+int 0x15
+jnc .a20_verify
+
+; Fallback to port 0x92 (Fast A20)
+.a20_port92:
+    in   al, 0x92
+    test al, 0x02
+    jnz  .a20_verify
+    or   al, 0x02
+    and  al, 0xFE
+    out  0x92, al
+
+; Last resort: keyboard controller
+.a20_verify:
+    call check_a20
+    jnz .a20_done
+    call a20_via_kbc
+```
+
+<Warning>
+  If A20 cannot be enabled, the kernel sets a warning flag in the boot info structure but continues anyway.
+</Warning>
+
+### E820 Memory Map
+
+Stage 2 queries the BIOS for available memory regions:
+
+```asm boot/stage2.asm
+mov  di, BINFO_E820     ; Buffer at 0x9100
+xor  ebx, ebx
+xor  bp, bp             ; Entry counter
+
+.e820_loop:
+    mov  eax, 0xE820
+    mov  ecx, 24        ; Request 24-byte entries
+    mov  edx, 0x534D4150  ; 'SMAP' signature
+    int  0x15
+    ; Restore ES=0 after each call (BIOS may modify)
+    push ax
+    xor  ax, ax
+    mov  es, ax
+    pop  ax
+    jc   .e820_done
+    cmp  eax, 0x534D4150
+    jne  .e820_done
+    ; Validate entry is non-zero
+    mov  eax, [di]
+    or   eax, [di+4]
+    or   eax, [di+8]
+    or   eax, [di+12]
+    jz   .e820_next
+    add  di, 24
+    inc  bp
+.e820_next:
+    test ebx, ebx
+    jnz  .e820_loop
+.e820_done:
+    mov  [BINFO_E820CNT], bp
+```
+
+### Paging Setup
+
+Identity paging is configured for the first 1 GB using 2 MB pages:
+
+```asm boot/stage2.asm
+PML4_ADDR     equ 0x1000
+PDPT_ADDR     equ 0x2000
+PD_IDENT_ADDR equ 0x3000
+
+; Clear page table area
+mov  edi, PML4_ADDR
+xor  eax, eax
+mov  ecx, (0x5000 / 4)
+rep  stosd
+
+; PML4[0] -> PDPT
+mov  dword [PML4_ADDR],     PDPT_ADDR | 0x03
+mov  dword [PML4_ADDR + 4], 0
+
+; PDPT[0] -> PD for identity mapping
+mov  dword [PDPT_ADDR],     PD_IDENT_ADDR | 0x03
+mov  dword [PDPT_ADDR + 4], 0
+
+; Fill PD with 512 entries (2 MB each = 1 GB)
+mov  edi, PD_IDENT_ADDR
+mov  eax, 0x00000083     ; Present, R/W, PS (2MB pages)
+mov  ecx, 512
+.fill_pd:
+    mov  [edi],   eax
+    mov  dword [edi+4], 0
+    add  eax, 0x200000   ; +2 MB
+    add  edi, 8
+    loop .fill_pd
+```
+
+<Note>
+  The bootloader also maps the framebuffer (LFB) if VESA returns a physical address above 1 GB.
+</Note>
+
+### PIC Remapping
+
+The Programmable Interrupt Controller (PIC) is remapped to avoid conflicts:
+
+```asm boot/stage2.asm
+; Master PIC: IRQ 0-7 -> INT 0x20-0x27
+; Slave PIC:  IRQ 8-15 -> INT 0x28-0x2F
+
+cli
+mov al, 0x11        ; ICW1: Initialize
+out 0x20, al
+out 0xA0, al
+out 0x80, al        ; I/O delay
+
+mov al, 0x20        ; ICW2 master: offset 0x20
+out 0x21, al
+out 0x80, al
+
+mov al, 0x28        ; ICW2 slave: offset 0x28
+out 0xA1, al
+out 0x80, al
+
+mov al, 0x04        ; ICW3 master: slave at IRQ2
+out 0x21, al
+out 0x80, al
+
+mov al, 0x02        ; ICW3 slave: cascade identity
+out 0xA1, al
+out 0x80, al
+
+mov al, 0x01        ; ICW4: 8086 mode
+out 0x21, al
+out 0xA1, al
+out 0x80, al
+
+mov al, 0xFF        ; Mask all interrupts initially
+out 0x21, al
+out 0xA1, al
+```
+
+### Entering Long Mode
+
+The final transition involves loading a minimal GDT and enabling several CPU features:
+
+```asm boot/stage2.asm
+; Load GDT
+lgdt [gdt64_desc]
+lidt [idt_null_desc]    ; Empty IDT for now
+
+; Enable PAE (Physical Address Extension)
+mov eax, cr4
+or  eax, (1 << 5)       ; CR4.PAE = 1
+mov cr4, eax
+
+; Load PML4 into CR3
+mov eax, PML4_ADDR
+mov cr3, eax
+
+; Enable Long Mode in EFER MSR
+mov ecx, 0xC0000080     ; EFER MSR
+rdmsr
+or  eax, (1 << 8)       ; EFER.LME = 1
+xor edx, edx
+wrmsr
+
+; Enable paging and protected mode
+mov eax, cr0
+or  eax, (1 << 31) | (1 << 0)  ; CR0.PG = 1, CR0.PE = 1
+mov cr0, eax
+
+; Far jump to 64-bit code
+o32 jmp far [far_jump_ptr]
+```
+
+The GDT is minimal but sufficient:
+
+```asm boot/stage2.asm
+align 8
+gdt64:
+    dq 0x0000000000000000    ; Null descriptor
+    dq 0x00AF9A000000FFFF    ; Code: 64-bit, ring 0
+    dq 0x00CF92000000FFFF    ; Data: 64-bit, ring 0
+gdt64_end:
+
+gdt64_desc:
+    dw gdt64_end - gdt64 - 1
+    dd gdt64
+```
+
+### 64-bit Entry Point
+
+Once in long mode, Stage 2 sets up the final environment:
+
+```asm boot/stage2.asm
+BITS 64
+long_mode_entry:
+    cli
+    mov ax, 0x10       ; Data segment selector
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    xor ax, ax
+    mov fs, ax
+    mov gs, ax
+    mov rsp, 0x8FF00   ; Set up stack
+    xor rbp, rbp
+
+    ; Disable FPU emulation, enable SSE
+    mov rax, cr0
+    and ax, 0xFFFB     ; Clear CR0.EM
+    or  ax, 0x0002     ; Set CR0.MP
+    mov cr0, rax
+    
+    mov rax, cr4
+    or  ax, (1 << 9) | (1 << 10)  ; CR4.OSFXSR, CR4.OSXMMEXCPT
+    mov cr4, rax
+
+    ; Jump to kernel
+    mov rax, KERNEL_PHYS_ADDR    ; 0x10000
+    jmp rax
+```
+
+<Info>
+  At this point, the CPU is in 64-bit long mode with paging enabled, and the kernel binary has been loaded at physical address `0x10000`.
+</Info>
+
+## Kernel Entry (Rust)
+
+### Assembly Stub
+
+The kernel's entry point is defined in inline assembly within `main.rs`:
+
+```rust kernel/src/main.rs
+global_asm!(
+    ".section .text._start, \"ax\"",
+    ".global _start",
+    ".code64",
+    "_start:",
+    "    cli",
+    "    cld",
+    "    lea rsp, [rip + {STACK_TOP}]",
+    "    xor rbp, rbp",
+    "    lea rdi, [rip + {BSS_START}]",
+    "    lea rcx, [rip + {BSS_END}]",
+    "    sub rcx, rdi",
+    "    jz 1f",
+    "    test rcx, rcx",
+    "    js  1f",
+    "    xor eax, eax",
+    "    rep stosb",      // Zero out BSS
+    "1:",
+    "    call {RUST_MAIN}",
+    "2:  hlt",
+    "    jmp 2b",
+    STACK_TOP = sym __stack_top,
+    BSS_START = sym __bss_start,
+    BSS_END   = sym __bss_end,
+    RUST_MAIN = sym rust_main,
+);
+```
+
+### Rust Entry Function
+
+The `rust_main` function is the true kernel entry point:
+
+```rust kernel/src/main.rs
+#[no_mangle]
+extern "C" fn rust_main() -> ! {
+    // 1. Initialize memory allocator
+    unsafe {
+        ALLOCATOR.init();
+    }
+
+    // 2. Set up interrupts
+    unsafe {
+        arch::idt::init_idt();
+    }
+    
+    // 3. Initialize drivers
+    drivers::serial::init();
+    time::pit::init();
+    
+    // 4. Enable interrupts
+    unsafe {
+        core::arch::asm!("sti", options(nostack, preserves_flags));
+    }
+    
+    // 5. Continue with system initialization...
+    // ...
+}
+```
+
+## Boot Information Structure
+
+Stage 2 passes information to the kernel via a structure at `0x9000`:
+
+```
+Offset  Size  Field
+------  ----  -----
+0x00    2     E820 entry count
+0x02    2     Flags (bit 0: VESA ok, bit 1: A20 warning)
+0x04    4     Linear framebuffer address
+0x08    2     Screen width
+0x0A    2     Screen height
+0x0C    2     Pitch (bytes per line)
+0x0E    1     Bits per pixel
+0x100+  N     E820 memory map entries (24 bytes each)
+```
+
+## Summary
+
+The boot process takes the system through three major mode transitions:
+
+<CardGroup cols={3}>
+  <Card title="Real Mode" icon="1">
+    16-bit, 1 MB addressing, BIOS services available
+  </Card>
+  <Card title="Protected Mode" icon="2">
+    32-bit, 4 GB addressing, transitional state
+  </Card>
+  <Card title="Long Mode" icon="3">
+    64-bit, full virtual addressing, kernel executes here
+  </Card>
+</CardGroup>
+
+<Tip>
+  The entire boot process from BIOS POST to Rust `rust_main()` takes approximately 500-800ms on real hardware, depending on disk speed and BIOS initialization time.
+</Tip>

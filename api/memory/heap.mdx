@@ -1,0 +1,310 @@
+---
+title: Heap Configuration
+description: Memory layout constants and global allocator setup for Portix OS
+---
+
+The heap configuration defines the memory region used for dynamic allocation in Portix OS. These constants control the buddy allocator's behavior and memory layout.
+
+## Location
+
+`kernel/src/mem/mod.rs`
+
+---
+
+## Memory Layout Constants
+
+### HEAP_START
+
+Starting physical address of the kernel heap.
+
+```rust
+pub const HEAP_START: usize = 0x0100_0000;
+```
+
+<ParamField path="value" type="usize">
+  `0x0100_0000` (16 MiB) - Heap begins at the 16 MiB mark in physical memory.
+</ParamField>
+
+This address is chosen to avoid:
+- Low memory (0-1 MiB): BIOS data, interrupt vectors, bootloader
+- Kernel code and data (1-16 MiB typically)
+
+### HEAP_SIZE
+
+Total size of the kernel heap in bytes.
+
+```rust
+pub const HEAP_SIZE: usize = 64 * 1024 * 1024;
+```
+
+<ParamField path="value" type="usize">
+  `67,108,864` bytes (64 MiB) - Total heap capacity.
+</ParamField>
+
+The heap occupies the range **0x0100_0000 to 0x0500_0000** (16 MiB to 80 MiB).
+
+---
+
+## Order Constants
+
+The buddy allocator uses "orders" as power-of-two block sizes.
+
+### MIN_ORDER
+
+Smallest allocatable block order.
+
+```rust
+pub const MIN_ORDER: usize = 4;
+```
+
+<ParamField path="value" type="usize">
+  Order 4 = 2^4 = **16 bytes** minimum allocation.
+</ParamField>
+
+Allocations smaller than 16 bytes are rounded up to 16 bytes. This minimum prevents excessive fragmentation and ensures enough space for free list node metadata.
+
+### MAX_ORDER
+
+Largest allocatable block order.
+
+```rust
+pub const MAX_ORDER: usize = 22;
+```
+
+<ParamField path="value" type="usize">
+  Order 22 = 2^22 = **4,194,304 bytes** (4 MiB) maximum single allocation.
+</ParamField>
+
+Allocations larger than 4 MiB will fail. This is a design trade-off:
+- Larger MAX_ORDER = more memory per allocation, but more internal fragmentation
+- Smaller MAX_ORDER = less waste, but cannot satisfy large allocations
+
+### ORDER_COUNT
+
+Total number of order levels maintained by the allocator.
+
+```rust
+pub const ORDER_COUNT: usize = MAX_ORDER - MIN_ORDER + 1;
+```
+
+<ParamField path="value" type="usize">
+  `19` orders (4 through 22 inclusive)
+</ParamField>
+
+This defines the size of the `free_lists` array in `BuddyInner`.
+
+---
+
+## Order to Size Reference
+
+Each order corresponds to a power-of-two block size:
+
+| Order | Size (bytes) | Size (human) |
+|-------|--------------|-------------|
+| 4     | 16           | 16 B        |
+| 5     | 32           | 32 B        |
+| 6     | 64           | 64 B        |
+| 7     | 128          | 128 B       |
+| 8     | 256          | 256 B       |
+| 9     | 512          | 512 B       |
+| 10    | 1,024        | 1 KiB       |
+| 11    | 2,048        | 2 KiB       |
+| 12    | 4,096        | 4 KiB       |
+| 13    | 8,192        | 8 KiB       |
+| 14    | 16,384       | 16 KiB      |
+| 15    | 32,768       | 32 KiB      |
+| 16    | 65,536       | 64 KiB      |
+| 17    | 131,072      | 128 KiB     |
+| 18    | 262,144      | 256 KiB     |
+| 19    | 524,288      | 512 KiB     |
+| 20    | 1,048,576    | 1 MiB       |
+| 21    | 2,097,152    | 2 MiB       |
+| 22    | 4,194,304    | 4 MiB       |
+
+---
+
+## Global Allocator Setup
+
+To use the buddy allocator as the global allocator:
+
+```rust
+use crate::mem::allocator::BuddyAllocator;
+
+#[global_allocator]
+static ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
+
+pub fn init() {
+    unsafe {
+        ALLOCATOR.init();
+    }
+}
+```
+
+Once initialized, Rust's allocation APIs work automatically:
+
+```rust
+use alloc::vec::Vec;
+use alloc::string::String;
+use alloc::boxed::Box;
+
+pub fn example() {
+    // Uses BuddyAllocator under the hood
+    let mut v = Vec::new();
+    v.push(42);
+    
+    let s = String::from("Hello, Portix!");
+    let boxed = Box::new([1, 2, 3, 4, 5]);
+}
+```
+
+---
+
+## Helper Functions
+
+### alloc_stats_free_total()
+
+Calculates the total number of free blocks across all orders.
+
+```rust
+pub fn alloc_stats_free_total() -> usize
+```
+
+<ResponseField name="returns" type="usize">
+  Total count of free blocks in the allocator.
+</ResponseField>
+
+#### Implementation
+
+```rust
+use core::sync::atomic::Ordering;
+use crate::mem::allocator::ALLOC_STATS;
+
+pub fn alloc_stats_free_total() -> usize {
+    let mut total = 0usize;
+    for cell in &ALLOC_STATS.free_blocks {
+        total += cell.load(Ordering::Relaxed);
+    }
+    total
+}
+```
+
+#### Usage Example
+
+```rust
+use crate::mem::alloc_stats_free_total;
+
+pub fn check_heap_health() {
+    let free_blocks = alloc_stats_free_total();
+    if free_blocks == 0 {
+        println!("WARNING: Heap exhausted!");
+    } else {
+        println!("Heap health: {} free blocks", free_blocks);
+    }
+}
+```
+
+---
+
+## Memory Map Example
+
+Typical Portix OS memory layout:
+
+```
+0x0000_0000 ┌─────────────────────┐
+            │ BIOS / IVT          │  Low memory
+0x0010_0000 ├─────────────────────┤
+            │ Kernel Code         │  Loaded by bootloader
+            │ Kernel Data         │
+            │ BSS                 │
+0x0100_0000 ├─────────────────────┤ ◄─── HEAP_START
+            │                     │
+            │   BUDDY ALLOCATOR   │  64 MiB heap
+            │   (Dynamic Heap)    │
+            │                     │
+0x0500_0000 ├─────────────────────┤ ◄─── HEAP_START + HEAP_SIZE
+            │                     │
+            │   (Reserved for     │  Future use
+            │    other purposes)  │
+            │                     │
+```
+
+---
+
+## Configuration Guidelines
+
+### Adjusting Heap Size
+
+To change heap size:
+
+```rust
+// For 128 MiB heap:
+pub const HEAP_SIZE: usize = 128 * 1024 * 1024;
+
+// For 256 MiB heap:
+pub const HEAP_SIZE: usize = 256 * 1024 * 1024;
+```
+
+Ensure:
+- Total size is a power of two (or sum of powers of two)
+- Does not overlap with kernel or hardware regions
+- System has sufficient physical RAM
+
+### Adjusting Order Range
+
+To support larger single allocations:
+
+```rust
+// Allow up to 16 MiB allocations:
+pub const MAX_ORDER: usize = 24;  // 2^24 = 16 MiB
+```
+
+To reduce minimum allocation size:
+
+```rust
+// Allow 8-byte minimum:
+pub const MIN_ORDER: usize = 3;  // 2^3 = 8 bytes
+```
+
+Note: Smaller MIN_ORDER increases metadata overhead.
+
+---
+
+## Performance Considerations
+
+### Internal Fragmentation
+
+Worst-case internal fragmentation approaches 50% when allocations are just over half a block size:
+
+```rust
+// Request 33 bytes:
+// - Allocator rounds to order 6 (64 bytes)
+// - Wastes 31 bytes (48% internal fragmentation)
+```
+
+### External Fragmentation
+
+The buddy system **eliminates external fragmentation** through coalescing:
+- When a block is freed, it merges with its buddy
+- Repeated alloc/free cycles return to initial state
+
+### Cache Effects
+
+The allocator uses prefetch hints on x86_64:
+
+```rust
+#[cfg(target_arch = "x86_64")]
+core::arch::x86_64::_mm_prefetch(
+    buddy_ptr as *const i8,
+    core::arch::x86_64::_MM_HINT_T0,
+);
+```
+
+This brings the buddy block into L1 cache before coalescing.
+
+---
+
+## Related
+
+- [BuddyAllocator](buddy-allocator) - Allocator implementation
+- kernel/src/mem/mod.rs:7-11 - Constant definitions
+- kernel/src/mem/allocator.rs:10 - Constant usage

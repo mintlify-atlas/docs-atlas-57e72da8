@@ -1,97 +1,140 @@
----
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
----
+<div className="relative overflow-hidden bg-[#020627] dark:bg-[#020627]">
+  <div className="absolute inset-0 bg-gradient-to-br from-[#529c3a]/10 via-transparent to-[#848c8e]/10"></div>
+  <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 lg:py-24">
+    <div className="text-center">
+      <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white dark:text-white mb-6">
+        Portix OS Documentation
+      </h1>
+      <p className="text-lg sm:text-xl text-gray-300 dark:text-gray-300 max-w-3xl mx-auto mb-8">
+        A high-performance x86_64 kernel written in Rust from scratch. Learn how to build, understand, and contribute to a bare-metal operating system.
+      </p>
+      <div className="flex flex-col sm:flex-row gap-4 justify-center items-center flex-wrap">
+        <a
+          href="/quickstart"
+          className="inline-flex items-center px-6 py-3 bg-[#238636] hover:bg-[#2ea043] text-white font-semibold rounded-md transition-colors"
+        >
+          Get Started
+        </a>
+        <a
+          href="/architecture/overview"
+          className="inline-flex items-center px-6 py-3 bg-white/10 hover:bg-white/20 border border-white/30 text-white font-semibold rounded-md transition-colors"
+        >
+          Explore Architecture
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
 
-## Setting up
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-3">Quick Start</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Get Portix OS running in just a few steps
+  </p>
 
-Get your documentation site up and running in minutes.
+  <Steps>
+    <Step title="Clone the repository">
+      Clone the Portix OS source code from GitHub:
+      ```bash
+      git clone https://github.com/omarPVP123131/Portix-OS.git
+      cd Portix-OS
+      ```
+    </Step>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+    <Step title="Install dependencies">
+      Ensure you have Rust nightly, Python 3, and QEMU installed:
+      ```bash
+      rustup install nightly
+      rustup default nightly
+      ```
+    </Step>
 
-## Make it yours
+    <Step title="Build and run">
+      Use the build script to compile and launch in QEMU:
+      ```bash
+      python scripts/build.py --mode=iso
+      ```
+      <Note>
+        The kernel will boot directly into 64-bit Long Mode and display the interactive UI with tabs for System, Terminal, Devices, IDE, and File Explorer.
+      </Note>
+    </Step>
+  </Steps>
+</div>
 
-Design a docs site that looks great and empowers your users.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-3">Explore by Topic</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Dive into the core systems that power Portix OS
+  </p>
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+  <CardGroup cols={2}>
+    <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+      Understand the modular design and how components interact
+    </Card>
+    <Card title="Boot Process" icon="rocket" href="/architecture/boot-process">
+      Learn how Portix boots from BIOS to Long Mode
+    </Card>
+    <Card title="Memory Management" icon="memory" href="/architecture/memory-management">
+      Explore the Buddy System allocator and heap architecture
+    </Card>
+    <Card title="Interrupt Handling" icon="bolt" href="/architecture/interrupt-handling">
+      See how IDT, ISRs, and IRQs are configured
+    </Card>
+  </CardGroup>
+</div>
 
-## Create beautiful pages
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-3">Core Components</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Deep dive into the kernel subsystems
+  </p>
 
-Everything you need to create world-class documentation.
+  <CardGroup cols={2}>
+    <Card title="Drivers" icon="microchip" href="/core/drivers">
+      ATA storage, PS/2 input, PCI/ACPI bus drivers
+    </Card>
+    <Card title="Filesystem" icon="folder-tree" href="/core/filesystem">
+      VFS layer with FAT32 and ISO9660 support
+    </Card>
+    <Card title="Graphics" icon="image" href="/core/graphics">
+      VESA framebuffer with alpha blending
+    </Card>
+    <Card title="Console & UI" icon="terminal" href="/core/console">
+      Interactive terminal and tabbed interface
+    </Card>
+  </CardGroup>
+</div>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-3">API Reference</h2>
+  <p className="text-base text-gray-600 dark:text-gray-400 mb-8">
+    Detailed documentation for developers
+  </p>
 
-## Need inspiration?
+  <CardGroup cols={3}>
+    <Card title="Buddy Allocator" icon="layer-group" href="/api/memory/buddy-allocator">
+      Memory allocation internals
+    </Card>
+    <Card title="Storage Drivers" icon="hard-drive" href="/api/drivers/storage">
+      ATA, FAT32, and VFS APIs
+    </Card>
+    <Card title="Framebuffer" icon="desktop" href="/api/graphics/framebuffer">
+      Graphics rendering API
+    </Card>
+  </CardGroup>
+</div>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="bg-white/5 dark:bg-[#1a1d27] border border-gray-200 dark:border-[#27272a] rounded-xl p-8 text-center">
+    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">Ready to contribute?</h2>
+    <p className="text-base text-gray-600 dark:text-gray-400 mb-6">
+      Portix OS is an open-source project. Join the community and help build the next generation of bare-metal systems.
+    </p>
+    <a
+      href="/development/contributing"
+      className="inline-flex items-center px-6 py-3 bg-[#238636] hover:bg-[#2ea043] text-white font-semibold rounded-md transition-colors"
+    >
+      Contributing Guide
+    </a>
+  </div>
+</div>

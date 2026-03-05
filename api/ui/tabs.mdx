@@ -1,0 +1,536 @@
+---
+title: Tab System API
+description: Multi-tab UI architecture and state management
+icon: "window-restore"
+---
+
+## Overview
+
+The tab system provides a multi-view UI with state management for IDE, file explorer, terminal, system info, and hardware devices.
+
+**Location**: `kernel/src/ui/`
+
+## Tab Enumeration
+
+```rust
+pub enum Tab {
+    System,
+    Terminal,
+    Devices,
+    Ide,
+    Explorer,
+}
+```
+
+**Modules**:
+- **System**: Hardware info and diagnostics (`ui/tabs/system.rs`)
+- **Terminal**: Interactive shell (`ui/tabs/terminal.rs`)
+- **Devices**: PCI/USB device enumeration (`ui/tabs/devices.rs`)
+- **IDE**: Text editor with syntax highlighting (`ui/tabs/ide.rs`)
+- **Explorer**: File browser with FAT32 support (`ui/tabs/explorer.rs`)
+
+---
+
+## Chrome (UI Shell)
+
+### draw_chrome
+
+```rust
+pub fn draw_chrome(
+    c:      &mut Console,
+    lay:    &Layout,
+    hw:     &HardwareInfo,
+    active: Tab,
+    mx:     i32,
+    my:     i32,
+)
+```
+
+Draws the main UI chrome including header, tab bar, and status bar.
+
+**Location**: `kernel/src/ui/chrome.rs:105`
+
+<ParamField path="c" type="&mut Console" required>
+  Console for drawing operations
+</ParamField>
+
+<ParamField path="lay" type="&Layout" required>
+  Layout configuration (responsive)
+</ParamField>
+
+<ParamField path="hw" type="&HardwareInfo" required>
+  Hardware info for header display
+</ParamField>
+
+<ParamField path="active" type="Tab" required>
+  Currently active tab
+</ParamField>
+
+<ParamField path="mx" type="i32" required>
+  Mouse X coordinate
+</ParamField>
+
+<ParamField path="my" type="i32" required>
+  Mouse Y coordinate
+</ParamField>
+
+**Components**:
+1. **Header** (`0..header_h`): Logo, CPU badge, status indicators
+2. **Accent Bar** (`header_h..header_h+4`): Neon yellow separator
+3. **Tab Bar** (`tab_y..tab_y+tab_h`): F1-F5 tab buttons with hover
+4. **Status Bar** (`bottom_y..fh`): Path, RAM, uptime, mouse position
+
+**Example:**
+
+```rust
+use crate::ui::chrome::draw_chrome;
+use crate::ui::Tab;
+
+let mut console = Console::new();
+let layout = Layout::new(console.width(), console.height());
+let hw = HardwareInfo::detect();
+
+draw_chrome(&mut console, &layout, &hw, Tab::Ide, mouse_x, mouse_y);
+console.present();
+```
+
+---
+
+## IDE Tab
+
+### IdeState
+
+Manages multiple text buffers with syntax highlighting.
+
+```rust
+pub struct IdeState {
+    pub buffers:    [Option<TextBuffer>; MAX_BUFFERS],  // 8 buffers max
+    pub active:     usize,
+    pub buf_count:  usize,
+    pub status_msg: [u8; 80],
+    pub status_len: usize,
+    pub status_err: bool,
+    pub menu:       MenuState,
+    pub show_ln:    bool,     // Line numbers
+    pub show_help:  bool,     // F1 help overlay
+    pub input:      InputBox,
+}
+```
+
+**Location**: `kernel/src/ui/tabs/ide.rs:497`
+
+### TextBuffer
+
+Paginated text buffer supporting large files.
+
+```rust
+pub struct TextBuffer {
+    pub head_page: i32,
+    pub tail_page: i32,
+    pub page_cnt:  usize,
+    pub line_cnt:  usize,
+    pub name:      [u8; 256],
+    pub lang:      Lang,        // Rust | C | Asm | Plain
+    pub dirty:     bool,
+    pub cursor_l:  usize,       // Line
+    pub cursor_c:  usize,       // Column
+    pub scroll:    usize,
+}
+```
+
+**Location**: `kernel/src/ui/tabs/ide.rs:224`
+
+**Limits**:
+- `MAX_LINES`: 4096
+- `MAX_LINE_LEN`: 512 bytes
+- `PAGE_LINES`: 64 lines per page
+- `MAX_BUFFERS`: 8 simultaneous files
+
+---
+
+### IdeState Methods
+
+#### new
+
+```rust
+pub fn new() -> Self
+```
+
+Creates a new IDE state with one empty "untitled.txt" buffer.
+
+---
+
+#### open_new
+
+```rust
+pub fn open_new(&mut self, name: &str) -> bool
+```
+
+Opens a new empty buffer.
+
+<ParamField path="name" type="&str" required>
+  File name (determines syntax highlighting)
+</ParamField>
+
+**Returns**: `true` if buffer created, `false` if limit reached
+
+---
+
+#### open_with_data
+
+```rust
+pub fn open_with_data(&mut self, name: &str, data: &[u8]) -> bool
+```
+
+Opens a buffer and loads data.
+
+<ParamField path="name" type="&str" required>
+  File name
+</ParamField>
+
+<ParamField path="data" type="&[u8]" required>
+  File contents (UTF-8 encoded)
+</ParamField>
+
+**Returns**: `true` on success
+
+---
+
+#### handle_key
+
+```rust
+pub fn handle_key(&mut self, key: Key, ctrl: bool, vis: usize) -> bool
+```
+
+Processes keyboard input.
+
+<ParamField path="key" type="Key" required>
+  Key press event
+</ParamField>
+
+<ParamField path="ctrl" type="bool" required>
+  Control key modifier
+</ParamField>
+
+<ParamField path="vis" type="usize" required>
+  Visible lines (for scrolling)
+</ParamField>
+
+**Returns**: `true` if key was handled
+
+**Key Bindings**:
+- `Ctrl+S`: Save file
+- `Ctrl+N`: New file
+- `Ctrl+W`: Close buffer
+- `Ctrl+Tab`: Next buffer
+- `F1`: Toggle help overlay
+- Arrow keys: Navigate
+- `Enter`: New line
+- `Backspace`/`Delete`: Edit
+
+---
+
+### draw_ide_tab
+
+```rust
+pub fn draw_ide_tab(
+    c:   &mut Console,
+    lay: &Layout,
+    ide: &IdeState,
+)
+```
+
+Renders the IDE interface.
+
+**Location**: `kernel/src/ui/tabs/ide.rs:791`
+
+<ParamField path="c" type="&mut Console" required>
+  Console for drawing
+</ParamField>
+
+<ParamField path="lay" type="&Layout" required>
+  Layout configuration
+</ParamField>
+
+<ParamField path="ide" type="&IdeState" required>
+  IDE state (read-only)
+</ParamField>
+
+**Layout**:
+```
+┌─────────────────────────────────────┐
+│ Archivo | Editar | Ver | Ayuda  [?]│  Menu bar (22px)
+├─────────────────────────────────────┤
+│ ⬡ main.rs ●  │  untitled.txt      │  Buffer tabs (20px)
+├─────────────────────────────────────┤
+│ 1 │ fn main() {                    │  Editor area
+│ 2 │     println!("Hello");         │  (gutter + text)
+│ 3 │ }                              │
+├─────────────────────────────────────┤
+│ Ln 2  Col 5 │ Rust │ main.rs       │  Status bar (18px)
+└─────────────────────────────────────┘
+```
+
+**Features**:
+- Line numbers (toggleable)
+- Syntax highlighting (Rust, C, ASM)
+- Cursor block rendering
+- Dropdown menus
+- F1 help overlay
+
+---
+
+## Explorer Tab
+
+### ExplorerState
+
+File browser state with FAT32 integration.
+
+```rust
+pub struct ExplorerState {
+    // Navigation
+    pub path_stack: [PathNode; MAX_PATH_DEPTH],  // 32 levels
+    pub path_depth: usize,
+    pub entries:    [Option<DirEntryInfo>; MAX_ENTRIES],  // 256 files
+    pub entry_count:usize,
+    pub selected:   usize,
+    pub scroll:     usize,
+    
+    // Preview
+    pub preview:      [u8; PREVIEW_BYTES],  // 2048 bytes
+    pub preview_len:  usize,
+    
+    // UI State
+    pub input:     InputBox,
+    pub vfs_sel:   usize,
+    pub show_vfs:  bool,
+    pub view:      ExplorerView,  // Files | Bookmarks | Recent
+    pub context:   ContextMenu,
+    
+    // File operations
+    pub open_request: bool,
+    pub open_cluster: u32,
+    pub open_name:    [u8; 256],
+}
+```
+
+**Location**: `kernel/src/ui/tabs/explorer.rs:285`
+
+---
+
+### ExplorerState Methods
+
+#### new
+
+```rust
+pub fn new(root_cluster: u32) -> Self
+```
+
+Creates explorer state with FAT32 root cluster.
+
+<ParamField path="root_cluster" type="u32" required>
+  FAT32 root directory cluster
+</ParamField>
+
+---
+
+#### refresh
+
+```rust
+pub fn refresh(&mut self, vol: &Fat32Volume)
+```
+
+Reloads directory contents from disk.
+
+<ParamField path="vol" type="&Fat32Volume" required>
+  FAT32 volume driver
+</ParamField>
+
+---
+
+#### handle_key
+
+```rust
+pub fn handle_key(&mut self, key: Key) -> bool
+```
+
+Processes keyboard input.
+
+**Key Bindings**:
+- `Up`/`Down`: Navigate files
+- `Enter`: Open file/directory
+- `Backspace`: Go up one directory
+- `F1`: Help overlay
+- `F5`: Refresh
+- `N`: New folder
+- `F`: New file
+- `D`/`Delete`: Delete file
+- `Tab`: Switch view (Files/Bookmarks/Recent)
+
+---
+
+#### handle_right_click
+
+```rust
+pub fn handle_right_click(
+    &mut self,
+    rx: usize,
+    ry: usize,
+    lay_cly: usize,
+    fw: usize,
+)
+```
+
+Handles context menu on right-click.
+
+<ParamField path="rx" type="usize" required>
+  Right-click X coordinate
+</ParamField>
+
+<ParamField path="ry" type="usize" required>
+  Right-click Y coordinate
+</ParamField>
+
+<ParamField path="lay_cly" type="usize" required>
+  Content area Y offset
+</ParamField>
+
+<ParamField path="fw" type="usize" required>
+  Framebuffer width
+</ParamField>
+
+**Context Actions**:
+- Sidebar: Open folder, Add bookmark, Copy path
+- Tree: Open, New folder, Refresh
+- File: Open, Open with IDE, Rename, Delete, Properties
+- Empty: New folder, New file, Refresh
+
+---
+
+### draw_explorer_tab
+
+```rust
+pub fn draw_explorer_tab(
+    c:   &mut Console,
+    lay: &Layout,
+    exp: &ExplorerState,
+)
+```
+
+Renders the file explorer UI.
+
+**Location**: `kernel/src/ui/tabs/explorer.rs:633`
+
+<ParamField path="c" type="&mut Console" required>
+  Console for drawing
+</ParamField>
+
+<ParamField path="lay" type="&Layout" required>
+  Layout configuration
+</ParamField>
+
+<ParamField path="exp" type="&ExplorerState" required>
+  Explorer state
+</ParamField>
+
+**Layout**:
+```
+┌──────┬────────┬─────────────────────────────┐
+│ VFS  │ Path   │ Name      │ Type │ Size    │  Toolbar (28px)
+├──────┼────────┼───────────┼──────┼─────────┤
+│ /    │ /home  │ main.rs   │ Rust │ 2.4 KB  │  Content area
+│ boot │ /usr   │ lib.rs    │ Rust │ 1.8 KB  │
+│ dev  │ /etc   │ README.md │ Text │ 512 B   │
+├──────┴────────┴───────────┴──────┴─────────┤
+│ Preview: main.rs                           │  Preview (76px)
+│ fn main() {                                │
+├────────────────────────────────────────────┤
+│ 3 elementos                                │  Status (18px)
+└────────────────────────────────────────────┘
+```
+
+**Panels**:
+- **VFS Sidebar** (120px): Virtual filesystem tree
+- **Path Tree** (150px): Current directory path
+- **File List**: Name, type, size columns
+- **Preview Panel**: First 4 lines of text files
+- **Status Bar**: File count and messages
+
+---
+
+## Layout Struct
+
+### Fields
+
+```rust
+pub struct Layout {
+    pub fw:        usize,  // Framebuffer width
+    pub fh:        usize,  // Framebuffer height
+    pub header_h:  usize,  // Header height (38-60px)
+    pub gold_h:    usize,  // Gold accent bar (4px)
+    pub tab_h:     usize,  // Tab bar (22-32px)
+    pub tab_y:     usize,  // Tab Y position
+    pub content_y: usize,  // Content area start
+    pub bottom_y:  usize,  // Status bar Y
+    pub status_h:  usize,  // Status height (18-24px)
+    pub pad:       usize,  // Padding (8-18px)
+    pub font_w:    usize,  // Font width (8px)
+    pub font_h:    usize,  // Font height (8px)
+}
+```
+
+**Location**: `kernel/src/graphics/driver/framebuffer.rs:148`
+
+### Helper Methods
+
+```rust
+pub fn left_w(&self) -> usize        // Left column width
+pub fn right_w(&self) -> usize       // Right column width  
+pub fn content_h(&self) -> usize     // Content area height
+pub fn content_lines(&self) -> usize // Visible text lines
+```
+
+---
+
+## Example: Custom Tab
+
+```rust
+use crate::graphics::driver::framebuffer::{Console, Layout, Color};
+use crate::ui::chrome::draw_chrome;
+use crate::ui::Tab;
+
+pub fn draw_custom_tab(c: &mut Console, lay: &Layout) {
+    let content_y = lay.content_y;
+    let content_h = lay.content_h();
+    
+    // Clear content area
+    c.fill_rect(0, content_y, lay.fw, content_h, Color::new(0x1E, 0x1E, 0x1E));
+    
+    // Draw header
+    c.fill_rect(0, content_y, lay.fw, 24, Color::new(0x33, 0x33, 0x33));
+    c.write_at("My Custom Tab", 12, content_y + 8, Color::WHITE);
+    
+    // Draw content
+    let mut y = content_y + 40;
+    for i in 0..10 {
+        c.write_at(&format!("Item {}", i), 20, y, Color::new(0xCC, 0xCC, 0xCC));
+        y += 16;
+    }
+}
+```
+
+---
+
+## Coordinate Reference
+
+**Typical 1024x768 layout**:
+
+| Region | Y Range | Height |
+|--------|---------|--------|
+| Header | 0-48 | 48px |
+| Accent | 48-52 | 4px |
+| Tabs | 52-78 | 26px |
+| Content | 78-730 | 652px |
+| Status | 730-748 | 18px |
+
+**All values are responsive** and scale with framebuffer resolution via `Layout::new()`.

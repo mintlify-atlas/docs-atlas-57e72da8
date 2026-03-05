@@ -1,0 +1,668 @@
+---
+title: Storage Drivers
+description: ATA PIO driver, FAT32 filesystem, and VFS abstraction
+---
+
+# Storage Drivers
+
+Portix OS provides bare-metal storage access through an ATA PIO driver, FAT32 filesystem implementation, and virtual filesystem abstraction.
+
+---
+
+## ATA Bus
+
+### AtaBus::scan()
+
+Scans all ATA channels (primary/secondary) and detects connected drives.
+
+```rust
+pub fn scan() -> Self
+```
+
+<Warning>
+  **Call only once during boot.** This method performs a hardware reset via `reset_and_init()`. 
+  Multiple calls will cause the drive to become unresponsive in QEMU/VirtualBox.
+</Warning>
+
+**Returns:** `AtaBus` instance containing all detected drives.
+
+**Example:**
+```rust
+let ata = AtaBus::scan();
+if let Some(info) = ata.info(DriveId::Primary0) {
+    println!("Found drive: {}", info.model_str());
+}
+```
+
+### AtaBus::count()
+
+Returns the number of detected drives.
+
+```rust
+pub fn count(&self) -> usize
+```
+
+### AtaBus::info()
+
+Retrieves drive information for a specific drive ID.
+
+```rust
+pub fn info(&self, id: DriveId) -> Option<&DriveInfo>
+```
+
+<ParamField path="id" type="DriveId" required>
+  Drive identifier: `Primary0`, `Primary1`, `Secondary0`, or `Secondary1`
+</ParamField>
+
+**Returns:** `Some(DriveInfo)` if drive exists, `None` otherwise.
+
+### AtaBus::drive()
+
+Creates an I/O handle for a detected drive.
+
+```rust
+pub fn drive(&self, id: DriveId) -> Option<AtaDrive>
+```
+
+<ParamField path="id" type="DriveId" required>
+  Drive identifier
+</ParamField>
+
+**Returns:** `Some(AtaDrive)` handle for I/O operations, `None` if drive not found.
+
+---
+
+## ATA Drive
+
+### AtaDrive::from_info()
+
+Creates a drive handle from cached `DriveInfo` without re-scanning the bus.
+
+```rust
+pub fn from_info(info: DriveInfo) -> Self
+```
+
+<ParamField path="info" type="DriveInfo" required>
+  Previously obtained drive information
+</ParamField>
+
+<Check>
+  **Safe to call anytime.** Does not trigger hardware reset.
+</Check>
+
+**Example:**
+```rust
+let info = get_cached_drive_info().expect("No cached drive");
+let drive = AtaDrive::from_info(info);
+```
+
+### AtaDrive::read_sectors()
+
+Reads consecutive sectors from the drive.
+
+```rust
+pub fn read_sectors(
+    &self,
+    lba: u64,
+    count: usize,
+    buf: &mut [u8]
+) -> AtaResult<()>
+```
+
+<ParamField path="lba" type="u64" required>
+  Logical Block Address (sector number) to start reading from
+</ParamField>
+
+<ParamField path="count" type="usize" required>
+  Number of 512-byte sectors to read
+</ParamField>
+
+<ParamField path="buf" type="&mut [u8]" required>
+  Buffer to receive data. Must be exactly `count * 512` bytes.
+</ParamField>
+
+**Errors:**
+- `AtaError::BadBuffer` - Buffer size is not a multiple of 512
+- `AtaError::OutOfRange` - LBA exceeds drive capacity
+- `AtaError::Timeout` - Drive did not respond
+- `AtaError::DeviceError(u8)` - Drive reported an error
+
+**Example:**
+```rust
+let mut buf = [0u8; 512];
+drive.read_sectors(0, 1, &mut buf)?;
+```
+
+### AtaDrive::write_sectors()
+
+Writes consecutive sectors to the drive.
+
+```rust
+pub fn write_sectors(
+    &self,
+    lba: u64,
+    count: usize,
+    buf: &[u8]
+) -> AtaResult<()>
+```
+
+<ParamField path="lba" type="u64" required>
+  Logical Block Address to start writing to
+</ParamField>
+
+<ParamField path="count" type="usize" required>
+  Number of 512-byte sectors to write
+</ParamField>
+
+<ParamField path="buf" type="&[u8]" required>
+  Data to write. Must be exactly `count * 512` bytes.
+</ParamField>
+
+**Automatically calls `flush()` after each sector in LBA28/LBA48 modes.**
+
+### AtaDrive::flush()
+
+Flushes the drive's write cache to physical media.
+
+```rust
+pub fn flush(&self) -> AtaResult<()>
+```
+
+**Example:**
+```rust
+drive.write_sectors(100, 1, &data)?;
+drive.flush()?;
+```
+
+---
+
+## Drive Information
+
+### DriveInfo
+
+Contains metadata about a detected ATA drive.
+
+```rust
+pub struct DriveInfo {
+    pub id: DriveId,
+    pub kind: DriveType,
+    pub total_sectors: u64,
+    pub capacity_mib: u64,
+    pub lba48: bool,
+    pub model: [u8; 40],
+    pub firmware: [u8; 8],
+    pub serial: [u8; 20],
+}
+```
+
+<ResponseField name="id" type="DriveId">
+  Drive position: `Primary0`, `Primary1`, `Secondary0`, `Secondary1`
+</ResponseField>
+
+<ResponseField name="kind" type="DriveType">
+  Drive type: `Ata` or `Atapi`
+</ResponseField>
+
+<ResponseField name="total_sectors" type="u64">
+  Total addressable 512-byte sectors
+</ResponseField>
+
+<ResponseField name="capacity_mib" type="u64">
+  Drive capacity in MiB (total_sectors / 2048)
+</ResponseField>
+
+<ResponseField name="lba48" type="bool">
+  True if drive supports LBA48 (>128 GiB)
+</ResponseField>
+
+### DriveInfo::model_str()
+
+Returns the drive model as a UTF-8 string.
+
+```rust
+pub fn model_str(&self) -> &str
+```
+
+### DriveInfo::serial_str()
+
+Returns the drive serial number.
+
+```rust
+pub fn serial_str(&self) -> &str
+```
+
+### DriveInfo::firmware_str()
+
+Returns the firmware revision.
+
+```rust
+pub fn firmware_str(&self) -> &str
+```
+
+---
+
+## Cached Drive Access
+
+Portix v0.8.0 introduces a global drive cache to avoid repeated hardware resets.
+
+### store_primary_drive_info()
+
+Stores the Primary0 drive info in the global cache.
+
+```rust
+pub fn store_primary_drive_info(info: DriveInfo)
+```
+
+<Warning>
+  Call exactly **once** during boot after `AtaBus::scan()`.
+</Warning>
+
+**Example (in main.rs):**
+```rust
+let ata = AtaBus::scan();
+if let Some(info) = ata.info(DriveId::Primary0) {
+    store_primary_drive_info(*info);
+}
+```
+
+### get_cached_drive_info()
+
+Retrieves the cached Primary0 drive info without touching hardware.
+
+```rust
+pub fn get_cached_drive_info() -> Option<DriveInfo>
+```
+
+**Returns:** `Some(DriveInfo)` if cached, `None` if not yet stored.
+
+**Example (in disk commands):**
+```rust
+let info = get_cached_drive_info()
+    .ok_or("No drive cached")?;
+let drive = AtaDrive::from_info(info);
+let vol = Fat32Volume::mount(drive)?;
+```
+
+---
+
+## FAT32 Volume
+
+### Fat32Volume::mount()
+
+Mounts a FAT32 volume from an ATA drive.
+
+```rust
+pub fn mount(drive: AtaDrive) -> FatResult<Self>
+```
+
+<ParamField path="drive" type="AtaDrive" required>
+  Drive handle to mount from
+</ParamField>
+
+**Errors:**
+- `FatError::NotFat32` - Volume is not FAT32 or MBR is invalid
+- `FatError::Ata(AtaError)` - Underlying drive error
+
+**Example:**
+```rust
+let info = get_cached_drive_info().unwrap();
+let drive = AtaDrive::from_info(info);
+let vol = Fat32Volume::mount(drive)?;
+```
+
+### Fat32Volume::list_dir()
+
+Iterates over directory entries.
+
+```rust
+pub fn list_dir<F>(
+    &self,
+    dir_cluster: u32,
+    cb: F
+) -> FatResult<()>
+where F: FnMut(&DirEntryInfo)
+```
+
+<ParamField path="dir_cluster" type="u32" required>
+  Cluster number of the directory (use `root_cluster()` for root)
+</ParamField>
+
+<ParamField path="cb" type="FnMut(&DirEntryInfo)" required>
+  Callback invoked for each entry
+</ParamField>
+
+**Example:**
+```rust
+vol.list_dir(vol.root_cluster(), |entry| {
+    println!("{}: {} bytes", entry.name_str(), entry.size);
+})?;
+```
+
+### Fat32Volume::find_entry()
+
+Searches for a file or directory by name.
+
+```rust
+pub fn find_entry(
+    &self,
+    dir_cluster: u32,
+    name: &str
+) -> FatResult<DirEntryInfo>
+```
+
+<ParamField path="dir_cluster" type="u32" required>
+  Directory to search in
+</ParamField>
+
+<ParamField path="name" type="&str" required>
+  Filename to find (case-insensitive)
+</ParamField>
+
+**Returns:** `DirEntryInfo` if found.
+
+**Errors:**
+- `FatError::NotFound` - Entry does not exist
+
+### Fat32Volume::read_file()
+
+Reads file contents into a buffer.
+
+```rust
+pub fn read_file(
+    &self,
+    entry: &DirEntryInfo,
+    buf: &mut [u8]
+) -> FatResult<usize>
+```
+
+<ParamField path="entry" type="&DirEntryInfo" required>
+  File entry to read
+</ParamField>
+
+<ParamField path="buf" type="&mut [u8]" required>
+  Buffer to receive file data
+</ParamField>
+
+**Returns:** Number of bytes read (capped by buffer size).
+
+**Errors:**
+- `FatError::IsDir` - Entry is a directory, not a file
+
+**Example:**
+```rust
+let entry = vol.find_entry(vol.root_cluster(), "readme.txt")?;
+let mut buf = vec![0u8; entry.size as usize];
+vol.read_file(&entry, &mut buf)?;
+```
+
+### Fat32Volume::write_file()
+
+Writes data to a file, replacing its contents.
+
+```rust
+pub fn write_file(
+    &self,
+    entry: &mut DirEntryInfo,
+    data: &[u8]
+) -> FatResult<()>
+```
+
+<ParamField path="entry" type="&mut DirEntryInfo" required>
+  File entry to write to (will be updated)
+</ParamField>
+
+<ParamField path="data" type="&[u8]" required>
+  Data to write
+</ParamField>
+
+**Frees the old cluster chain and allocates new clusters as needed.**
+
+### Fat32Volume::create_file()
+
+Creates a new empty file.
+
+```rust
+pub fn create_file(
+    &self,
+    dir_cluster: u32,
+    name: &str
+) -> FatResult<DirEntryInfo>
+```
+
+<ParamField path="dir_cluster" type="u32" required>
+  Parent directory cluster
+</ParamField>
+
+<ParamField path="name" type="&str" required>
+  Filename (max 255 chars)
+</ParamField>
+
+**Returns:** `DirEntryInfo` for the new file.
+
+**Errors:**
+- `FatError::NameTooLong` - Name exceeds 255 characters
+- `FatError::NoSpace` - No free directory slots
+
+### Fat32Volume::create_dir()
+
+Creates a new directory.
+
+```rust
+pub fn create_dir(
+    &self,
+    dir_cluster: u32,
+    name: &str
+) -> FatResult<DirEntryInfo>
+```
+
+**Allocates a cluster and initializes it as an empty directory.**
+
+### Fat32Volume::delete_entry()
+
+Deletes a file or directory.
+
+```rust
+pub fn delete_entry(&self, entry: &DirEntryInfo) -> FatResult<()>
+```
+
+<ParamField path="entry" type="&DirEntryInfo" required>
+  Entry to delete
+</ParamField>
+
+**Frees all clusters and marks the directory entry as deleted (0xE5).**
+
+---
+
+## Directory Entry
+
+### DirEntryInfo
+
+Represents a file or directory in the FAT32 filesystem.
+
+```rust
+pub struct DirEntryInfo {
+    pub name: [u8; 256],
+    pub name_len: usize,
+    pub is_dir: bool,
+    pub size: u32,
+    pub cluster: u32,
+    pub dir_sector: u64,
+    pub dir_offset: usize,
+}
+```
+
+<ResponseField name="name" type="[u8; 256]">
+  Filename buffer (may contain LFN or 8.3 name)
+</ResponseField>
+
+<ResponseField name="name_len" type="usize">
+  Actual length of the filename in bytes
+</ResponseField>
+
+<ResponseField name="is_dir" type="bool">
+  True if this is a directory
+</ResponseField>
+
+<ResponseField name="size" type="u32">
+  File size in bytes (0 for directories)
+</ResponseField>
+
+<ResponseField name="cluster" type="u32">
+  First cluster number
+</ResponseField>
+
+<ResponseField name="dir_sector" type="u64">
+  LBA of the sector containing this entry's metadata
+</ResponseField>
+
+<ResponseField name="dir_offset" type="usize">
+  Byte offset within the sector
+</ResponseField>
+
+### DirEntryInfo::name_str()
+
+Returns the filename as a UTF-8 string.
+
+```rust
+pub fn name_str(&self) -> &str
+```
+
+---
+
+## Virtual Filesystem (VFS)
+
+### VfsMount
+
+Maps Unix-style paths to FAT32 clusters.
+
+```rust
+pub struct VfsMount
+```
+
+### VfsMount::new()
+
+Creates an empty mount table.
+
+```rust
+pub const fn new() -> Self
+```
+
+### VfsMount::register()
+
+Registers a path → cluster mapping.
+
+```rust
+pub fn register(&mut self, path: &str, cluster: u32)
+```
+
+<ParamField path="path" type="&str" required>
+  Unix path (e.g., "/home", "/bin")
+</ParamField>
+
+<ParamField path="cluster" type="u32" required>
+  FAT32 cluster number
+</ParamField>
+
+**Example:**
+```rust
+let mut vfs = VfsMount::new();
+vfs.register("/", vol.root_cluster());
+
+let home = vol.find_entry(vol.root_cluster(), "home")?;
+vfs.register("/home", home.cluster);
+```
+
+### VfsMount::resolve()
+
+Resolves a path to its cluster number.
+
+```rust
+pub fn resolve(&self, path: &str) -> Option<u32>
+```
+
+<ParamField path="path" type="&str" required>
+  Path to resolve
+</ParamField>
+
+**Returns:** `Some(cluster)` if path is registered, `None` otherwise.
+
+### VfsMount::root_cluster()
+
+Returns the root directory cluster (defaults to 2 if not registered).
+
+```rust
+pub fn root_cluster(&self) -> u32
+```
+
+---
+
+## Path Utilities
+
+### path_split()
+
+Splits a path into components.
+
+```rust
+pub fn path_split(
+    path: &str,
+    bufs: &mut [[u8; 64]],
+    lens: &mut [usize]
+) -> usize
+```
+
+**Example:**
+```rust
+let mut bufs = [[0u8; 64]; 8];
+let mut lens = [0usize; 8];
+let n = path_split("/home/user/file.txt", &mut bufs, &mut lens);
+// n = 3: "home", "user", "file.txt"
+```
+
+### component_str()
+
+Extracts a component as a string slice.
+
+```rust
+pub fn component_str<'a>(
+    bufs: &'a [[u8; 64]],
+    lens: &[usize],
+    idx: usize
+) -> &'a str
+```
+
+### path_join()
+
+Joins a directory and filename.
+
+```rust
+pub fn path_join(
+    dir: &str,
+    name: &str,
+    out: &mut [u8]
+) -> usize
+```
+
+**Returns:** Number of bytes written to `out`.
+
+### basename()
+
+Extracts the filename from a path.
+
+```rust
+pub fn basename(path: &str) -> &str
+```
+
+**Example:**
+```rust
+assert_eq!(basename("/home/user/foo.txt"), "foo.txt");
+```
+
+### parent_copy()
+
+Copies the parent directory path.
+
+```rust
+pub fn parent_copy(path: &str, out: &mut [u8]) -> usize
+```
+
+**Returns:** Number of bytes written.

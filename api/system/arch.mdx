@@ -1,0 +1,404 @@
+---
+title: 'arch'
+description: 'Architecture-specific system initialization and CPU exception handling'
+---
+
+## Overview
+
+The `arch` module provides x86_64-specific functionality including interrupt descriptor table (IDT) setup, global descriptor table (GDT) configuration, task state segment (TSS) management, CPU exception handlers, and hardware detection.
+
+## Module Structure
+
+```
+arch/
+├── mod.rs          - Module declarations
+├── idt.rs          - IDT/GDT/TSS setup
+├── isr_handlers.rs - Exception handlers
+├── hardware.rs     - Hardware detection (CPUID, ATA, E820)
+└── halt.rs         - CPU halt utilities
+```
+
+## IDT Initialization
+
+### `init_idt()`
+
+Initializes the interrupt descriptor table, global descriptor table, task state segment, and exception handlers.
+
+**Location**: `kernel/src/arch/idt.rs:91`
+
+```rust
+pub unsafe fn init_idt()
+```
+
+**Description**: Performs complete x86_64 interrupt infrastructure setup:
+
+1. Configures IST1 (Interrupt Stack Table entry 1) for double fault handler with dedicated 16KB stack
+2. Builds TSS descriptor in GDT
+3. Loads GDT with new TSS entry
+4. Reloads code segment (CS) to apply GDT changes
+5. Sets data segment registers (DS, ES, SS) and clears FS/GS
+6. Loads TSS into TR register
+7. Installs CPU exception handlers (0x00-0x13)
+8. Installs IRQ handlers (0x20-0x2F), with dedicated PIT handler at IRQ0
+9. Loads IDTR
+10. Unmasks IRQ0 (PIT) in the PIC
+11. Enables interrupts with `sti`
+
+**Safety**: Must be called exactly once during kernel initialization before enabling interrupts.
+
+**Example**:
+```rust
+unsafe {
+    arch::idt::init_idt();
+}
+// Interrupts are now enabled and IDT is active
+```
+
+## Data Structures
+
+### `IdtEntry`
+
+Represents a single entry in the x86_64 IDT.
+
+**Location**: `kernel/src/arch/idt.rs:6`
+
+```rust
+#[repr(C, packed)]
+struct IdtEntry {
+    offset_low:  u16,
+    selector:    u16,
+    ist:         u8,
+    type_attr:   u8,
+    offset_mid:  u16,
+    offset_high: u32,
+    reserved:    u32,
+}
+```
+
+**Methods**:
+- `set_handler(&mut self, h: u64)` - Set interrupt handler with no IST
+- `set_handler_ist1(&mut self, h: u64)` - Set handler using IST1 (for double fault)
+
+### `Tss` (Task State Segment)
+
+Holds privilege level stacks and interrupt stacks.
+
+**Location**: `kernel/src/arch/idt.rs:42`
+
+```rust
+#[repr(C, packed)]
+struct Tss {
+    _res0:      u32,
+    rsp:        [u64; 3],    // Privilege level stacks
+    _res1:      u64,
+    ist:        [u64; 7],    // Interrupt stack table
+    _res2:      u64,
+    _res3:      u16,
+    iomap_base: u16,
+}
+```
+
+**Usage**: IST[0] (IST1) is configured to point to a dedicated 16KB stack for the double fault handler, preventing stack overflow from causing unrecoverable triple faults.
+
+### `Gdt` (Global Descriptor Table)
+
+**Location**: `kernel/src/arch/idt.rs:63`
+
+```rust
+#[repr(C, align(16))]
+struct Gdt {
+    null:     u64,  // 0x00: Null descriptor
+    code64:   u64,  // 0x08: 64-bit code segment
+    data64:   u64,  // 0x10: 64-bit data segment
+    tss_low:  u64,  // 0x18: TSS descriptor low 64 bits
+    tss_high: u64,  // 0x20: TSS descriptor high 32 bits
+}
+```
+
+## Exception Handlers
+
+All CPU exceptions are handled by specialized handlers in `isr_handlers.rs`.
+
+### `CrashFrame`
+
+Captures complete CPU state at time of exception.
+
+**Location**: `kernel/src/arch/isr_handlers.rs:33`
+
+```rust
+#[repr(C)]
+pub struct CrashFrame {
+    pub rip:    u64,  // Instruction pointer
+    pub rsp:    u64,  // Stack pointer
+    pub rflags: u64,  // CPU flags
+    pub cr3:    u64,  // Page table base
+    pub rax:    u64,  // General purpose registers
+    pub rbx:    u64,
+    pub rcx:    u64,
+    pub rdx:    u64,
+    pub rsi:    u64,
+    pub rdi:    u64,
+    pub r8:     u64,
+    pub r9:     u64,
+    pub r10:    u64,
+    pub r11:    u64,
+    pub r12:    u64,
+    pub r13:    u64,
+    pub r14:    u64,
+    pub r15:    u64,
+    pub rbp:    u64,
+    pub valid:  u8,   // 1 if frame was captured
+}
+```
+
+### Exception Handler Functions
+
+Each exception displays a detailed graphical crash screen with register dumps and diagnostic information.
+
+| Vector | Name | Handler Function | Description |
+|--------|------|------------------|-------------|
+| 0x00 | #DE | `isr_divide_by_zero()` | Division by zero or overflow |
+| 0x05 | #BR | `isr_bound_range()` | BOUND instruction range exceeded |
+| 0x06 | #UD | `isr_ud_handler()` | Invalid/undefined opcode |
+| 0x08 | #DF | `isr_double_fault()` | Double fault (uses IST1) |
+| 0x0D | #GP | `isr_gp_handler()` | General protection fault |
+| 0x0E | #PF | `isr_page_fault()` | Page fault |
+
+**Example: Page Fault Handler**
+
+**Location**: `kernel/src/arch/isr_handlers.rs:471`
+
+```rust
+#[no_mangle]
+extern "C" fn isr_page_fault(ec: u64) {
+    let cr2: u64;  // Faulting address
+    unsafe {
+        core::arch::asm!("mov {r}, cr2", r = out(reg) cr2);
+    }
+    // Display detailed page fault screen with:
+    // - Faulting address (CR2)
+    // - Error code breakdown (P/W/U/R/I bits)
+    // - Probable cause analysis
+    // - CPU context at fault time
+}
+```
+
+### Panic Handler
+
+Rust panic handler with comprehensive diagnostic screen.
+
+**Location**: `kernel/src/arch/isr_handlers.rs:318`
+
+```rust
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    unsafe { inline_capture_frame(); }
+    // Displays:
+    // - Panic message
+    // - File location (file:line:column)
+    // - Complete register dump
+    // - Suggested fixes based on panic message
+    // - Dynamic hints for common errors
+}
+```
+
+## Hardware Detection
+
+### `HardwareInfo`
+
+Comprehensive hardware detection using CPUID, ATA IDENTIFY, and E820 memory map.
+
+**Location**: `kernel/src/arch/hardware.rs:532`
+
+```rust
+pub struct HardwareInfo {
+    pub cpu:     CpuInfo,
+    pub ram:     RamInfo,
+    pub disks:   Disks,
+    pub display: DisplayInfo,
+}
+
+impl HardwareInfo {
+    pub fn detect_all() -> Self
+}
+```
+
+**Example**:
+```rust
+let hw = HardwareInfo::detect_all();
+kprintln!("CPU: {}", hw.cpu.brand_str());
+kprintln!("RAM: {} MB", hw.ram.usable_mb);
+kprintln!("Disks: {}", hw.disks.count);
+```
+
+### `CpuInfo`
+
+CPU detection via CPUID instruction.
+
+**Location**: `kernel/src/arch/hardware.rs:50`
+
+```rust
+pub struct CpuInfo {
+    pub vendor:        [u8; 13],  // "AuthenticAMD" / "GenuineIntel"
+    pub brand:         [u8; 49],  // Full CPU name
+    pub logical_cores: u8,
+    pub physical_cores: u8,
+    pub base_mhz:      u32,       // Base frequency
+    pub max_mhz:       u32,       // Max turbo frequency
+    pub has_sse2:      bool,
+    pub has_sse4:      bool,
+    pub has_avx:       bool,
+    pub has_avx2:      bool,
+    pub has_aes:       bool,
+    pub max_leaf:      u32,       // Highest standard CPUID leaf
+    pub max_ext_leaf:  u32,       // Highest extended CPUID leaf
+}
+
+impl CpuInfo {
+    pub fn detect() -> Self
+    pub fn brand_str(&self) -> &str
+    pub fn vendor_str(&self) -> &str
+    pub fn vendor_short(&self) -> &str  // "AMD" / "Intel"
+}
+```
+
+**Example**:
+```rust
+let cpu = CpuInfo::detect();
+assert!(cpu.has_sse2);  // Required for x86_64
+if cpu.has_avx2 {
+    kprintln!("AVX2 available: {} cores @ {} MHz",
+              cpu.physical_cores, cpu.max_mhz);
+}
+```
+
+### `DiskInfo`
+
+ATA/ATAPI disk detection (supports up to 4 drives).
+
+**Location**: `kernel/src/arch/hardware.rs:263`
+
+```rust
+pub struct DiskInfo {
+    pub present:  bool,
+    pub is_atapi: bool,        // CD-ROM/optical drive
+    pub model:    [u8; 41],
+    pub serial:   [u8; 21],
+    pub size_mb:  u64,
+    pub lba48:    bool,        // 48-bit LBA support
+    pub bus:      u8,          // 0=Primary, 1=Secondary
+    pub drive:    u8,          // 0=Master, 1=Slave
+}
+
+impl DiskInfo {
+    pub fn model_str(&self) -> &str
+    pub fn serial_str(&self) -> &str
+}
+
+pub struct Disks {
+    pub drives: [DiskInfo; 4],
+    pub count:  usize,
+}
+
+impl Disks {
+    pub fn detect() -> Self
+}
+```
+
+**Example**:
+```rust
+let disks = Disks::detect();
+for i in 0..disks.count {
+    let d = &disks.drives[i];
+    kprintln!("Disk {}: {} ({} MB) {}",
+              i, d.model_str(), d.size_mb,
+              if d.lba48 { "LBA48" } else { "LBA28" });
+}
+```
+
+### `RamInfo`
+
+Memory detection from E820 memory map (written by bootloader).
+
+**Location**: `kernel/src/arch/hardware.rs:470`
+
+```rust
+pub struct RamInfo {
+    pub usable_mb:  u64,   // Usable RAM (type 1 entries)
+    pub total_mb:   u64,   // Total physical RAM
+    pub entry_count: u16,  // Number of E820 entries
+}
+
+impl RamInfo {
+    pub fn detect() -> Self
+    pub fn usable_or_default(&self) -> u64  // Returns 64 MB if detection fails
+}
+```
+
+**Example**:
+```rust
+let ram = RamInfo::detect();
+kprintln!("Usable RAM: {} MB / {} MB total",
+          ram.usable_mb, ram.total_mb);
+```
+
+### `DisplayInfo`
+
+Framebuffer information from VESA (written by bootloader).
+
+**Location**: `kernel/src/arch/hardware.rs:505`
+
+```rust
+pub struct DisplayInfo {
+    pub lfb_addr: u64,     // Linear framebuffer physical address
+    pub width:    u16,
+    pub height:   u16,
+    pub pitch:    u16,     // Bytes per scanline
+    pub bpp:      u8,      // Bits per pixel
+}
+
+impl DisplayInfo {
+    pub fn detect() -> Self
+    pub fn total_vram_kb(&self) -> u32
+}
+```
+
+**Example**:
+```rust
+let disp = DisplayInfo::detect();
+kprintln!("Display: {}x{} @ {} bpp",
+          disp.width, disp.height, disp.bpp);
+kprintln!("Framebuffer: 0x{:X}", disp.lfb_addr);
+```
+
+## Assembly Stubs
+
+Exception entry points are defined in assembly (`isr.asm`) and call into Rust handlers:
+
+```nasm
+isr_0:   ; Division Error
+isr_1:   ; Debug
+isr_2:   ; NMI
+isr_8:   ; Double Fault (uses IST1)
+isr_13:  ; General Protection
+isr_14:  ; Page Fault
+; ... etc
+
+irq0_handler:      ; PIT timer, calls pit_tick()
+irq_stub_master:   ; Generic IRQ 0x21-0x27
+irq_stub_slave:    ; Generic IRQ 0x28-0x2F
+```
+
+## Safety Considerations
+
+- **init_idt()** must be called exactly once
+- Exception handlers **never return** - they halt the system
+- Double fault handler uses IST1 to prevent triple faults from stack overflow
+- All port I/O and CPUID operations are unsafe
+- Hardware detection may return default values if probing fails
+
+## See Also
+
+- [time](/api/system/time) - PIT timer and timing utilities
+- [mem](/api/memory/allocator) - Memory management
+- [drivers](/api/drivers/overview) - Device drivers

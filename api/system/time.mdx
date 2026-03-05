@@ -1,0 +1,322 @@
+---
+title: 'time'
+description: 'Programmable Interval Timer (PIT) and system timing utilities'
+---
+
+## Overview
+
+The `time` module provides system timing functionality using the Intel 8253/8254 Programmable Interval Timer (PIT). The timer is configured to generate interrupts at 100 Hz (every 10 milliseconds) via IRQ0.
+
+**Location**: `kernel/src/time/pit.rs`
+
+## Configuration
+
+### Timer Frequency
+
+```rust
+pub const PIT_HZ: u32 = 100;
+const PIT_DIVISOR: u16 = 11931;
+```
+
+The PIT base frequency is 1,193,182 Hz. Dividing by 11,931 yields approximately 100 Hz:
+
+```
+1,193,182 Hz / 11,931 = ~100 Hz (10 ms period)
+```
+
+### Hardware Ports
+
+```rust
+const PIT_CHANNEL0: u16 = 0x40;  // Channel 0 data port
+const PIT_CMD:      u16 = 0x43;  // Command register
+```
+
+## Initialization
+
+### `init()`
+
+Initializes the PIT to generate periodic interrupts at 100 Hz.
+
+**Location**: `kernel/src/time/pit.rs:45`
+
+```rust
+pub fn init()
+```
+
+**Description**: Programs PIT channel 0 in mode 3 (square wave generator) with a divisor of 11,931 to achieve 100 Hz interrupt rate.
+
+**Implementation**:
+```rust
+pub fn init() {
+    unsafe {
+        // Channel 0 | access lo/hi | mode 3 | binary
+        outb(PIT_CMD, 0x36);
+        outb(PIT_CHANNEL0, (PIT_DIVISOR & 0xFF) as u8);
+        outb(PIT_CHANNEL0, (PIT_DIVISOR >> 8) as u8);
+    }
+}
+```
+
+**Command Byte Breakdown** (`0x36`):
+- Bits 7-6: `00` = Channel 0
+- Bits 5-4: `11` = Access mode (low byte, then high byte)
+- Bits 3-1: `011` = Mode 3 (square wave generator)
+- Bit 0: `0` = Binary counter (not BCD)
+
+**Example**:
+```rust
+use crate::time::pit;
+
+pub fn kernel_init() {
+    pit::init();
+    // PIT now generates IRQ0 every 10 ms
+}
+```
+
+## Tick Counter
+
+### `TICKS`
+
+Global tick counter incremented on each IRQ0 interrupt.
+
+**Location**: `kernel/src/time/pit.rs:17`
+
+```rust
+pub static mut TICKS: u64 = 0;
+```
+
+**Description**: Raw tick counter. At 100 Hz, this increments 100 times per second. Use `ticks()` function for safe access.
+
+### `pit_tick()`
+
+Interrupt handler called by IRQ0 stub (defined in `isr.asm`).
+
+**Location**: `kernel/src/time/pit.rs:21`
+
+```rust
+#[no_mangle]
+pub extern "C" fn pit_tick() {
+    unsafe {
+        let v = core::ptr::read_volatile(&raw const TICKS);
+        core::ptr::write_volatile(&raw mut TICKS, v.wrapping_add(1));
+    }
+}
+```
+
+**Description**: Atomically increments the tick counter using volatile reads/writes to prevent compiler optimizations that could cause race conditions.
+
+**Note**: This function is called from assembly and must maintain the `extern "C"` calling convention and `#[no_mangle]` attribute.
+
+## Reading Time
+
+### `ticks()`
+
+Atomically reads the current tick count.
+
+**Location**: `kernel/src/time/pit.rs:30`
+
+```rust
+#[inline(always)]
+pub fn ticks() -> u64
+```
+
+**Returns**: Current number of timer ticks since boot.
+
+**Example**:
+```rust
+let start = pit::ticks();
+do_some_work();
+let elapsed = pit::ticks() - start;
+kprintln!("Operation took {} ticks ({} ms)", elapsed, elapsed * 10);
+```
+
+### `uptime_secs()`
+
+Returns system uptime in full seconds.
+
+**Location**: `kernel/src/time/pit.rs:36`
+
+```rust
+#[inline(always)]
+pub fn uptime_secs() -> u64 {
+    ticks() / PIT_HZ as u64
+}
+```
+
+**Returns**: Number of seconds since boot (fractional seconds discarded).
+
+**Example**:
+```rust
+let uptime = pit::uptime_secs();
+if uptime > 3600 {
+    kprintln!("System has been running for over an hour");
+}
+```
+
+### `uptime_hms()`
+
+Decomposes uptime into hours, minutes, and seconds.
+
+**Location**: `kernel/src/time/pit.rs:39`
+
+```rust
+pub fn uptime_hms() -> (u32, u32, u32)
+```
+
+**Returns**: Tuple of `(hours, minutes, seconds)`.
+
+**Implementation**:
+```rust
+pub fn uptime_hms() -> (u32, u32, u32) {
+    let s = uptime_secs() as u32;
+    (s / 3600, (s % 3600) / 60, s % 60)
+}
+```
+
+**Example**:
+```rust
+let (h, m, s) = pit::uptime_hms();
+kprintln!("Uptime: {:02}:{:02}:{:02}", h, m, s);
+// Output: "Uptime: 01:23:45"
+```
+
+## Usage Examples
+
+### Basic Timing
+
+```rust
+use crate::time::pit;
+
+// Wait approximately 1 second (100 ticks)
+let start = pit::ticks();
+while pit::ticks() - start < 100 {
+    // Busy wait
+}
+```
+
+### Measuring Execution Time
+
+```rust
+fn benchmark_function() {
+    let t0 = pit::ticks();
+    
+    expensive_operation();
+    
+    let elapsed = pit::ticks() - t0;
+    kprintln!("Operation completed in {} ms", elapsed * 10);
+}
+```
+
+### Periodic Task Scheduling
+
+```rust
+static mut LAST_UPDATE: u64 = 0;
+
+fn periodic_task() {
+    unsafe {
+        let now = pit::ticks();
+        if now - LAST_UPDATE >= 100 {  // Every 1 second
+            update_display();
+            LAST_UPDATE = now;
+        }
+    }
+}
+```
+
+### Uptime Display
+
+```rust
+fn show_system_info() {
+    let (h, m, s) = pit::uptime_hms();
+    kprintln!("System uptime: {}h {}m {}s", h, m, s);
+    kprintln!("Total ticks: {}", pit::ticks());
+}
+```
+
+## IRQ0 Integration
+
+The PIT is wired to IRQ0 (interrupt vector 0x20) in the IDT:
+
+**Location**: `kernel/src/arch/idt.rs:149`
+
+```rust
+let irq0 = core::mem::transmute::<unsafe extern "C" fn(), u64>(irq0_handler);
+IDT[0x20].set_handler(irq0);
+```
+
+The `irq0_handler` assembly stub (in `isr.asm`) calls `pit_tick()` and sends EOI to the PIC:
+
+```nasm
+irq0_handler:
+    push rax
+    push rcx
+    push rdx
+    
+    extern pit_tick
+    call pit_tick
+    
+    ; Send EOI to master PIC
+    mov al, 0x20
+    out 0x20, al
+    
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+```
+
+## Technical Details
+
+### Timer Resolution
+
+- **Frequency**: 100 Hz
+- **Period**: 10 ms per tick
+- **Resolution**: Minimum measurable interval is 10 ms
+- **Maximum uptime**: 2^64 ticks ≈ 5.8 billion years at 100 Hz
+
+### PIT Mode 3 (Square Wave)
+
+Mode 3 generates a square wave output:
+- Output starts HIGH
+- Goes LOW when count reaches N/2
+- Returns HIGH when count reaches N
+- Automatically reloads and repeats
+
+This mode is ideal for periodic interrupt generation.
+
+### Atomic Access
+
+All tick counter access uses volatile operations to ensure:
+- Compiler doesn't optimize away reads in loops
+- No torn reads (partial updates) on 64-bit counter
+- Proper memory ordering between IRQ handler and kernel code
+
+### Wrapping Behavior
+
+The tick counter uses wrapping arithmetic:
+```rust
+v.wrapping_add(1)
+```
+
+This ensures predictable overflow behavior when the 64-bit counter eventually wraps (after ~5.8 billion years).
+
+## Limitations
+
+1. **Resolution**: 10 ms minimum - cannot measure sub-millisecond intervals
+2. **Busy-waiting**: No sleep/yield mechanism - delays consume CPU
+3. **Drift**: Minor drift possible due to integer divisor rounding (1,193,182 / 11,931 ≈ 100.008 Hz)
+4. **Single Timer**: Only channel 0 is used; channels 1-2 unused
+
+## Future Enhancements
+
+Possible improvements:
+- APIC timer support for better resolution and per-core timers
+- High Precision Event Timer (HPET) support
+- Sleep queue for non-busy waiting
+- Monotonic clock abstraction
+- Real-time clock (RTC) integration for wall-clock time
+
+## See Also
+
+- [arch](/api/system/arch) - IDT/IRQ setup and interrupt handling
+- [drivers](/api/drivers/overview) - Device driver framework

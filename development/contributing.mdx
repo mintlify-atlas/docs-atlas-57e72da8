@@ -1,0 +1,401 @@
+---
+title: "Contributing to Portix OS"
+description: "Guidelines for contributing code, documentation, and improvements to Portix OS"
+icon: "code-pull-request"
+---
+
+## Welcome Contributors!
+
+Thank you for your interest in contributing to Portix OS! This is an open-source bare-metal operating system project, and contributions are always welcome.
+
+Whether you're fixing a bug, adding a feature, improving documentation, or optimizing performance, your help is valuable.
+
+## Prerequisites
+
+Before contributing, ensure you have:
+
+<CardGroup cols={2}>
+  <Card title="Development Environment" icon="laptop-code">
+    - Rust Nightly toolchain
+    - NASM assembler
+    - QEMU emulator
+    - LLVM binutils
+  </Card>
+  <Card title="Knowledge" icon="brain">
+    - Rust programming (especially `no_std`)
+    - x86-64 assembly basics
+    - Operating system concepts
+    - Git workflow
+  </Card>
+</CardGroup>
+
+## Getting Started
+
+<Steps>
+  <Step title="Fork and clone">
+    Fork the repository on GitHub and clone your fork:
+    ```bash
+    git clone https://github.com/YOUR-USERNAME/Portix-OS.git
+    cd Portix-OS
+    ```
+  </Step>
+
+  <Step title="Set up development environment">
+    Install Rust nightly and components:
+    ```bash
+    rustup toolchain install nightly
+    rustup default nightly
+    rustup component add rust-src --toolchain nightly
+    rustup component add llvm-tools-preview
+    ```
+  </Step>
+
+  <Step title="Verify build">
+    Ensure you can build and run the kernel:
+    ```bash
+    python scripts/build.py --mode=raw --run
+    ```
+  </Step>
+
+  <Step title="Create a branch">
+    Create a feature branch for your changes:
+    ```bash
+    git checkout -b feat/your-feature-name
+    ```
+  </Step>
+</Steps>
+
+## Code Standards
+
+### Rust Code
+
+#### No Standard Library (`no_std`)
+
+All kernel code must work without the Rust standard library:
+
+```rust
+#![no_std]
+#![no_main]
+
+// Use core and alloc instead
+use core::fmt::Write;
+use alloc::vec::Vec;
+```
+
+<Warning>
+Never use `std::` imports in kernel code. Use `core::` for core types and `alloc::` for heap-allocated types.
+</Warning>
+
+#### Minimize `unsafe`
+
+While `unsafe` is necessary for hardware access, minimize its use:
+
+```rust
+// ✅ Good: Minimal unsafe scope
+pub fn read_port(port: u16) -> u8 {
+    let value: u8;
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") value, in("dx") port);
+    }
+    value
+}
+
+// ❌ Bad: Unnecessary unsafe
+pub unsafe fn some_safe_function() {
+    // ... safe code ...
+}
+```
+
+Always document why `unsafe` is safe:
+
+```rust
+// SAFETY: Reading from I/O port 0x60 is safe because we've
+// initialized the keyboard controller and this is the data port.
+let scancode = unsafe { read_port(0x60) };
+```
+
+#### Code Formatting
+
+Follow Rust conventions:
+
+```bash
+cargo fmt
+cargo clippy
+```
+
+- Use 4 spaces for indentation
+- Keep lines under 100 characters
+- Use snake_case for functions and variables
+- Use CamelCase for types and enums
+
+### Assembly Code
+
+For assembly files in `boot/` and interrupt handlers:
+
+- Use Intel syntax
+- Add comments explaining each section
+- Keep code readable with proper spacing
+- Document any magic numbers or hardware-specific values
+
+```nasm
+; Good: Documented and clear
+mov eax, 0x80000000    ; CPUID function 0x80000000 - Get highest extended function
+cpuid
+
+; Bad: No explanation
+mov eax, 0x80000000
+cpuid
+```
+
+## Commit Message Guidelines
+
+Portix OS follows conventional commit message format:
+
+```
+type(scope): brief description in lowercase
+
+[optional body explaining the change]
+
+[optional footer with breaking changes or issue references]
+```
+
+### Commit Types
+
+| Type | Description | Example |
+|------|-------------|--------|
+| `feat` | New feature | `feat(drivers): add ps/2 mouse support` |
+| `fix` | Bug fix | `fix(mem): correct buddy allocator coalescing` |
+| `docs` | Documentation only | `docs(readme): update build instructions` |
+| `style` | Code style/formatting | `style(kernel): run cargo fmt` |
+| `refactor` | Code restructuring | `refactor(ata): extract drive detection logic` |
+| `perf` | Performance improvement | `perf(graphics): use rep stosd for fills` |
+| `test` | Adding tests | `test(allocator): add coalescing test` |
+| `arch` | Architecture/boot changes | `arch(boot): implement A20 fast gate` |
+| `chore` | Maintenance tasks | `chore: update rust toolchain` |
+
+### Commit Scope
+
+Use the module or component affected:
+
+- `mem` - Memory management
+- `drivers` - Device drivers
+- `graphics` - Graphics subsystem
+- `fs` - Filesystem
+- `boot` - Bootloader
+- `arch` - Architecture-specific code
+- `ui` - User interface
+- `console` - Terminal/console
+
+### Examples
+
+```bash
+# Good commits
+git commit -m "feat(fs): add directory creation support to fat32"
+git commit -m "fix(idt): correct page fault error code decoding"
+git commit -m "docs(architecture): add boot process diagram"
+git commit -m "perf(allocator): optimize buddy coalescing loop"
+
+# Bad commits
+git commit -m "Fixed bug"                    # Too vague
+git commit -m "Updated code"                 # Not descriptive
+git commit -m "FEAT: NEW FEATURE"            # Wrong case
+```
+
+### Commit Best Practices
+
+1. **One change per commit**: Don't mix unrelated changes
+2. **Keep commits atomic**: Each commit should be a complete, working change
+3. **Write in imperative mood**: "add feature" not "added feature"
+4. **Explain why, not what**: The diff shows what changed, explain why
+
+## Pull Request Process
+
+<Steps>
+  <Step title="Ensure code quality">
+    Before submitting:
+    ```bash
+    cargo fmt
+    cargo clippy
+    python scripts/build.py --mode=raw --run
+    ```
+    Verify:
+    - Code compiles without warnings
+    - Boots successfully in QEMU
+    - No regressions in existing functionality
+  </Step>
+
+  <Step title="Push to your fork">
+    ```bash
+    git push origin feat/your-feature-name
+    ```
+  </Step>
+
+  <Step title="Create pull request">
+    Go to GitHub and create a pull request with:
+    - Clear title describing the change
+    - Description of what and why
+    - Screenshots/videos if UI changes
+    - Reference any related issues
+  </Step>
+
+  <Step title="Address review feedback">
+    - Respond to reviewer comments
+    - Make requested changes
+    - Push additional commits to the same branch
+  </Step>
+</Steps>
+
+### PR Checklist
+
+- [ ] Code follows project style guidelines
+- [ ] All commits have meaningful messages
+- [ ] No compiler warnings
+- [ ] Boots successfully in QEMU and VirtualBox
+- [ ] Documentation updated if needed
+- [ ] No breaking changes (or clearly documented)
+- [ ] Serial output shows no errors
+
+## Areas to Contribute
+
+Not sure where to start? Here are some ideas:
+
+<CardGroup cols={2}>
+  <Card title="Terminal Commands" icon="terminal">
+    Add new commands in `kernel/src/console/terminal/commands/`
+    - File system operations
+    - System information utilities
+    - Debugging tools
+  </Card>
+
+  <Card title="Driver Support" icon="microchip">
+    Expand hardware support:
+    - USB controller
+    - Network card (E1000)
+    - Sound card (AC97)
+    - Additional filesystems
+  </Card>
+
+  <Card title="Graphics Optimizations" icon="image">
+    Improve rendering performance:
+    - Hardware acceleration
+    - Better font rendering
+    - Window manager primitives
+  </Card>
+
+  <Card title="Documentation" icon="book">
+    Improve or add documentation:
+    - Code comments
+    - API documentation
+    - Architecture diagrams
+    - Tutorials
+  </Card>
+</CardGroup>
+
+## Code Review Guidelines
+
+When reviewing PRs:
+
+- Be constructive and respectful
+- Focus on code quality and maintainability
+- Check for:
+  - Correctness and safety
+  - Performance implications
+  - Code clarity and documentation
+  - Adherence to project standards
+
+## Architecture Guidelines
+
+### Module Organization
+
+Keep the existing module structure:
+
+```text
+kernel/src/
+├── arch/          # Architecture-specific (IDT, GDT, ISR)
+├── console/       # Terminal and commands
+├── drivers/       # Device drivers
+│   ├── bus/       # PCI, ACPI
+│   ├── input/     # Keyboard, mouse
+│   └── storage/   # ATA, FAT32, VFS
+├── graphics/      # Framebuffer, rendering
+├── mem/           # Memory allocator
+├── time/          # Timers
+├── ui/            # User interface
+└── util/          # Utilities
+```
+
+### Adding New Drivers
+
+1. Create module in appropriate `drivers/` subdirectory
+2. Implement initialization function
+3. Call from `main.rs` during boot
+4. Add documentation
+5. Export necessary types in `mod.rs`
+
+### Adding Terminal Commands
+
+1. Create new file in `console/terminal/commands/`
+2. Implement command handler:
+   ```rust
+   pub fn cmd_mycommand(term: &mut Terminal, args: &[&str]) {
+       // Implementation
+   }
+   ```
+3. Register in `commands/mod.rs`
+4. Add help text
+
+## Testing Requirements
+
+All significant changes should be tested:
+
+- **Manual testing**: Boot in QEMU and VirtualBox
+- **Functionality**: Verify feature works as expected
+- **Regression**: Ensure existing features still work
+- **Edge cases**: Test boundary conditions
+
+For memory-related changes:
+- Check allocator statistics
+- Test under low memory
+- Verify no leaks
+
+## Documentation
+
+Good documentation is crucial:
+
+- Add doc comments to public APIs:
+  ```rust
+  /// Reads a byte from the specified I/O port.
+  ///
+  /// # Safety
+  /// The caller must ensure the port is valid and mapped.
+  pub unsafe fn read_port(port: u16) -> u8 {
+      // ...
+  }
+  ```
+
+- Update README if adding major features
+- Add architecture docs for complex subsystems
+- Include examples in doc comments
+
+## Communication
+
+- **Questions**: Open a GitHub issue with the `question` label
+- **Bugs**: Open an issue with the `bug` label and reproduction steps
+- **Feature requests**: Open an issue with the `enhancement` label
+- **Discussions**: Use GitHub Discussions for broader topics
+
+## License
+
+By contributing to Portix OS, you agree that your contributions will be licensed under the same license as the project.
+
+## Recognition
+
+All contributors are valued! Your name will be added to the contributors list in recognition of your work.
+
+---
+
+**Thank you for contributing to Portix OS!** Every contribution, no matter how small, helps make this project better.
+
+<Card title="Ready to Start?" icon="rocket" href="/development/building">
+  Head to the building guide to set up your development environment
+</Card>

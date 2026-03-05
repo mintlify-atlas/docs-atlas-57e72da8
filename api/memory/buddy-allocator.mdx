@@ -1,0 +1,429 @@
+---
+title: BuddyAllocator
+description: O(log N) buddy system allocator with zero external fragmentation
+---
+
+The `BuddyAllocator` implements a classic buddy system allocator for kernel heap management. It provides efficient O(log N) allocation and deallocation with automatic coalescing to minimize fragmentation.
+
+## Location
+
+`kernel/src/mem/allocator.rs`
+
+## Overview
+
+The buddy allocator manages the kernel heap by dividing memory into power-of-two sized blocks (orders). When a block is freed, it attempts to merge with its "buddy" block to form larger contiguous regions.
+
+### Key Features
+
+- **O(log N) complexity** for both allocation and deallocation
+- **Automatic coalescing** of adjacent free blocks
+- **Lock-free statistics** via atomic counters
+- **Debug tracing** for allocation/deallocation events
+- **Order-based free lists** (MIN_ORDER to MAX_ORDER)
+
+---
+
+## BuddyAllocator
+
+The main allocator structure that implements `GlobalAlloc`.
+
+### Structure Definition
+
+```rust
+pub struct BuddyAllocator {
+    inner:   core::cell::UnsafeCell<BuddyInner>,
+    inited:  AtomicBool,
+    locked:  AtomicBool,
+}
+
+struct BuddyInner {
+    free_lists: [*mut FreeNode; ORDER_COUNT],
+}
+```
+
+<ParamField path="inner" type="UnsafeCell<BuddyInner>">
+  Internal state containing free lists for each order. Protected by spinlock.
+</ParamField>
+
+<ParamField path="inited" type="AtomicBool">
+  Initialization flag. Ensures `init()` is called exactly once.
+</ParamField>
+
+<ParamField path="locked" type="AtomicBool">
+  Spinlock for mutual exclusion during allocation/deallocation.
+</ParamField>
+
+### Constructor
+
+```rust
+pub const fn new() -> Self
+```
+
+Creates a new uninitialized buddy allocator. Must call `init()` before use.
+
+<ResponseField name="returns" type="BuddyAllocator">
+  A new allocator instance with empty free lists.
+</ResponseField>
+
+---
+
+## init()
+
+Initializes the heap by dividing it into maximum-sized aligned blocks.
+
+```rust
+pub unsafe fn init(&self)
+```
+
+### Safety
+
+Must be called exactly once before any `alloc()` or `dealloc()` operations.
+
+### Behavior
+
+1. Marks allocator as initialized (atomic swap)
+2. Logs heap range via serial output
+3. Divides heap into largest possible aligned blocks
+4. Inserts blocks into appropriate order free lists
+5. Updates `ALLOC_STATS.free_blocks` counters
+6. Logs each initial block with order and size
+
+### Example Output
+
+```
+[  INF ] HEAP  Inicializando buddy allocator...
+[  INF ] HEAP  rango: 0x01000000 - 0x05000000
+[  INF ] HEAP  bloque ord=22 sz=4096K @ 0x01000000
+[   OK ] HEAP  listo — 16 bloques libres, 65536 KiB totales
+```
+
+### Example Usage
+
+```rust
+use crate::mem::allocator::BuddyAllocator;
+
+#[global_allocator]
+static ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
+
+pub fn init_heap() {
+    unsafe {
+        ALLOCATOR.init();
+    }
+}
+```
+
+---
+
+## alloc()
+
+Allocates a memory block of sufficient size and alignment.
+
+```rust
+unsafe fn alloc(&self, layout: Layout) -> *mut u8
+```
+
+### Parameters
+
+<ParamField path="layout" type="Layout">
+  Memory layout specifying size and alignment requirements.
+</ParamField>
+
+### Returns
+
+<ResponseField name="ptr" type="*mut u8">
+  Pointer to allocated memory, or `null` if allocation fails.
+</ResponseField>
+
+### Algorithm
+
+1. **Calculate order**: Determine minimum order needed for size/alignment
+2. **Find block**: Search free lists from requested order to MAX_ORDER
+3. **Split block**: If larger block found, recursively split until target order
+4. **Update stats**: Increment `total_allocs`, decrement `free_blocks[order]`
+5. **Return pointer**: Return address of allocated block
+
+### Order Calculation
+
+```rust
+fn order_for(size: usize) -> usize {
+    let mut ord = MIN_ORDER;
+    let mut blk = 1usize << MIN_ORDER;
+    while blk < size && ord < MAX_ORDER {
+        ord += 1;
+        blk <<= 1;
+    }
+    ord
+}
+```
+
+The order is calculated as: **order = ceil(log₂(max(size, align, 2^MIN_ORDER)))**
+
+### Block Splitting
+
+```rust
+unsafe fn buddy_alloc(inner: &mut BuddyInner, order: usize) -> *mut u8 {
+    let mut found_ord = MAX_ORDER + 1;
+    for o in order..=MAX_ORDER {
+        if !inner.free_lists[ord_idx(o)].is_null() {
+            found_ord = o;
+            break;
+        }
+    }
+    if found_ord > MAX_ORDER {
+        return ptr::null_mut();
+    }
+
+    let ptr = inner_pop(inner, found_ord).unwrap();
+    let mut cur_ord = found_ord;
+
+    while cur_ord > order {
+        cur_ord -= 1;
+        let buddy_ptr = (ptr as usize + (1 << cur_ord)) as *mut u8;
+        inner_push(inner, cur_ord, buddy_ptr);
+        ALLOC_STATS.free_blocks[ord_idx(cur_ord)].fetch_add(1, Ordering::Relaxed);
+    }
+    ptr
+}
+```
+
+When a larger block is found:
+- Split it into two buddies of order `n-1`
+- Keep the first half, return the second half to free list
+- Repeat until target order is reached
+
+---
+
+## dealloc()
+
+Deallocates a memory block and coalesces with buddy if possible.
+
+```rust
+unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout)
+```
+
+### Parameters
+
+<ParamField path="ptr" type="*mut u8">
+  Pointer to memory block to deallocate.
+</ParamField>
+
+<ParamField path="layout" type="Layout">
+  Original layout used during allocation.
+</ParamField>
+
+### Algorithm
+
+1. **Calculate order**: Determine order from layout size/alignment
+2. **Find buddy**: Calculate buddy address using XOR formula
+3. **Coalesce**: If buddy is free, merge into higher order block
+4. **Repeat**: Continue coalescing until buddy not free or MAX_ORDER reached
+5. **Update stats**: Increment `total_frees`, update `free_blocks`
+
+### Buddy Calculation
+
+```rust
+fn buddy_of(addr: usize, order: usize) -> usize {
+    let size   = 1usize << order;
+    let offset = addr - HEAP_START;
+    HEAP_START + (offset ^ size)
+}
+```
+
+The buddy address is calculated by XORing the offset with the block size:
+- For block at offset `O` with size `S`: buddy is at `O XOR S`
+- This ensures the two buddies can be merged into a block at `min(O, buddy_O)`
+
+### Coalescing Logic
+
+```rust
+unsafe fn buddy_free(inner: &mut BuddyInner, ptr: *mut u8, order: usize) {
+    let mut addr = ptr as usize;
+    let mut ord  = order;
+    let mut merges = 0u32;
+
+    loop {
+        if ord >= MAX_ORDER { break; }
+        let buddy_addr = buddy_of(addr, ord);
+        if buddy_addr < HEAP_START || buddy_addr >= HEAP_START + HEAP_SIZE { break; }
+        if !find_buddy(inner, ord, buddy_addr) { break; }
+
+        inner_remove(inner, ord, buddy_addr as *mut u8);
+        ALLOC_STATS.free_blocks[ord_idx(ord)].fetch_sub(1, Ordering::Relaxed);
+
+        addr  = addr.min(buddy_addr);
+        ord  += 1;
+        merges += 1;
+    }
+
+    inner_push(inner, ord, addr as *mut u8);
+}
+```
+
+---
+
+## AllocStats
+
+Lock-free statistics accessible from UI and monitoring tools.
+
+### Structure Definition
+
+```rust
+pub struct AllocStats {
+    pub total_allocs:  AtomicUsize,
+    pub total_frees:   AtomicUsize,
+    pub failed_allocs: AtomicUsize,
+    pub free_blocks:   [AtomicUsize; ORDER_COUNT],
+}
+
+pub static ALLOC_STATS: AllocStats = AllocStats::new();
+```
+
+<ParamField path="total_allocs" type="AtomicUsize">
+  Total number of successful allocations since initialization.
+</ParamField>
+
+<ParamField path="total_frees" type="AtomicUsize">
+  Total number of deallocations performed.
+</ParamField>
+
+<ParamField path="failed_allocs" type="AtomicUsize">
+  Count of allocation failures (OOM conditions).
+</ParamField>
+
+<ParamField path="free_blocks" type="[AtomicUsize; ORDER_COUNT]">
+  Per-order count of free blocks currently available (orders 4-22).
+</ParamField>
+
+### Usage Example
+
+```rust
+use crate::mem::allocator::ALLOC_STATS;
+use core::sync::atomic::Ordering;
+
+pub fn print_heap_stats() {
+    let allocs = ALLOC_STATS.total_allocs.load(Ordering::Relaxed);
+    let frees  = ALLOC_STATS.total_frees.load(Ordering::Relaxed);
+    let fails  = ALLOC_STATS.failed_allocs.load(Ordering::Relaxed);
+    
+    println!("Allocations: {}", allocs);
+    println!("Frees: {}", frees);
+    println!("Failed: {}", fails);
+    println!("In use: {}", allocs - frees);
+    
+    for ord in MIN_ORDER..=MAX_ORDER {
+        let count = ALLOC_STATS.free_blocks[ord_idx(ord)].load(Ordering::Relaxed);
+        if count > 0 {
+            println!("Order {}: {} blocks free ({} KiB)", 
+                ord, count, count * (1 << ord) >> 10);
+        }
+    }
+}
+```
+
+---
+
+## Free List Management
+
+Internal doubly-linked list operations for each order.
+
+### FreeNode Structure
+
+```rust
+#[repr(C)]
+struct FreeNode {
+    next: *mut FreeNode,
+    prev: *mut FreeNode,
+}
+```
+
+Each free block stores a `FreeNode` at its start address, forming intrusive linked lists.
+
+### Operations
+
+#### Push (Insert at Head)
+
+```rust
+unsafe fn inner_push(inner: &mut BuddyInner, order: usize, ptr: *mut u8) {
+    let idx  = ord_idx(order);
+    let node = FreeNode::init(ptr);
+    let head = inner.free_lists[idx];
+    (*node).next = head;
+    (*node).prev = ptr::null_mut();
+    if !head.is_null() {
+        (*head).prev = node;
+    }
+    inner.free_lists[idx] = node;
+}
+```
+
+#### Pop (Remove from Head)
+
+```rust
+unsafe fn inner_pop(inner: &mut BuddyInner, order: usize) -> Option<*mut u8> {
+    let idx  = ord_idx(order);
+    let node = inner.free_lists[idx];
+    if node.is_null() {
+        return None;
+    }
+    let next = (*node).next;
+    inner.free_lists[idx] = next;
+    if !next.is_null() {
+        (*next).prev = ptr::null_mut();
+    }
+    Some(node as *mut u8)
+}
+```
+
+#### Remove (Delete from Arbitrary Position)
+
+```rust
+unsafe fn inner_remove(inner: &mut BuddyInner, order: usize, ptr: *mut u8) {
+    let idx  = ord_idx(order);
+    let node = ptr as *mut FreeNode;
+    let prev = (*node).prev;
+    let next = (*node).next;
+    if prev.is_null() {
+        inner.free_lists[idx] = next;
+    } else {
+        (*prev).next = next;
+    }
+    if !next.is_null() {
+        (*next).prev = prev;
+    }
+}
+```
+
+---
+
+## Debug Tracing
+
+When compiled with `cfg(debug_assertions)`, the allocator emits detailed trace logs:
+
+### Allocation Trace
+
+```
+[ DBG ] HEAP  alloc ord=6 @ 0x01002000
+```
+
+### Deallocation Trace
+
+```
+[ DBG ] HEAP  free  ord=6 @ 0x01002000
+```
+
+### Coalescing Trace
+
+```
+[ DBG ] HEAP  merge x3 → ord=9
+```
+
+Shows that 3 buddy merges occurred, resulting in a block of order 9.
+
+---
+
+## Related
+
+- [Heap Configuration](heap) - Memory layout and constants
+- kernel/src/mem/allocator.rs:114 - `init()` implementation
+- kernel/src/mem/allocator.rs:255 - `alloc()` implementation  
+- kernel/src/mem/allocator.rs:289 - `dealloc()` implementation

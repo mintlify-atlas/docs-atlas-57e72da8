@@ -1,0 +1,386 @@
+---
+title: Bus Drivers
+description: PCI enumeration and ACPI power management
+---
+
+# Bus Drivers
+
+Portix OS provides PCI device enumeration and basic ACPI power control for bare-metal x86_64 systems.
+
+---
+
+## PCI Bus
+
+### PciBus
+
+Represents the scanned PCI bus with detected devices.
+
+```rust
+pub struct PciBus {
+    pub devices: [PciDevice; MAX_PCI_DEVICES],
+    pub count: usize,
+}
+```
+
+<ResponseField name="devices" type="[PciDevice; 64]">
+  Array of detected PCI devices (up to 64)
+</ResponseField>
+
+<ResponseField name="count" type="usize">
+  Number of valid devices in the array
+</ResponseField>
+
+### PciBus::scan()
+
+Scans all PCI buses and enumerates devices.
+
+```rust
+pub fn scan() -> Self
+```
+
+**Scanning algorithm:**
+1. Iterates through all 256 buses (0-255)
+2. Checks all 32 device slots per bus (0-31)
+3. Detects multi-function devices via header type bit 7
+4. Reads configuration space for vendor ID, device ID, class, subclass, prog IF, and IRQ
+
+**Returns:** `PciBus` with all detected devices.
+
+**Example:**
+```rust
+let pci = PciBus::scan();
+for i in 0..pci.count {
+    let dev = &pci.devices[i];
+    println!(
+        "[{:02X}:{:02X}.{}] {}: {}",
+        dev.bus, dev.device, dev.function,
+        dev.vendor_name(),
+        dev.class_name()
+    );
+}
+```
+
+**Sample output:**
+```
+[00:00.0] Intel: Host Bridge
+[00:01.0] Intel: VGA Controller
+[00:02.0] Intel: IDE Controller
+[00:1F.0] Intel: ISA Bridge
+```
+
+---
+
+## PCI Device
+
+### PciDevice
+
+Represents a single PCI device.
+
+```rust
+pub struct PciDevice {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub class_code: u8,
+    pub subclass: u8,
+    pub prog_if: u8,
+    pub header_type: u8,
+    pub irq_line: u8,
+}
+```
+
+<ResponseField name="bus" type="u8">
+  PCI bus number (0-255)
+</ResponseField>
+
+<ResponseField name="device" type="u8">
+  Device slot (0-31)
+</ResponseField>
+
+<ResponseField name="function" type="u8">
+  Function number (0-7 for multi-function devices)
+</ResponseField>
+
+<ResponseField name="vendor_id" type="u16">
+  Vendor ID (0xFFFF = no device)
+</ResponseField>
+
+<ResponseField name="device_id" type="u16">
+  Device ID
+</ResponseField>
+
+<ResponseField name="class_code" type="u8">
+  PCI class code (e.g., 0x01 = Mass Storage, 0x03 = Display)
+</ResponseField>
+
+<ResponseField name="subclass" type="u8">
+  PCI subclass (e.g., 0x01 for IDE, 0x00 for VGA)
+</ResponseField>
+
+<ResponseField name="prog_if" type="u8">
+  Programming interface byte
+</ResponseField>
+
+<ResponseField name="header_type" type="u8">
+  Header type (bit 7 = multi-function device)
+</ResponseField>
+
+<ResponseField name="irq_line" type="u8">
+  IRQ line (0xFF = none)
+</ResponseField>
+
+### PciDevice::empty()
+
+Creates a placeholder empty device (vendor_id = 0xFFFF).
+
+```rust
+pub const fn empty() -> Self
+```
+
+### PciDevice::class_name()
+
+Returns a human-readable class name.
+
+```rust
+pub fn class_name(&self) -> &'static str
+```
+
+**Recognized classes:**
+- **0x01**: Mass Storage
+  - 0x01: IDE Controller
+  - 0x06: SATA (AHCI)
+  - 0x08: NVM Express
+- **0x02**: Network Controller
+- **0x03**: Display Controller
+  - 0x00: VGA Controller
+  - 0x01: XGA Controller
+  - 0x02: 3D Controller
+- **0x06**: Bridge Device
+  - 0x00: Host Bridge
+  - 0x01: ISA Bridge
+  - 0x04: PCI-PCI Bridge
+- **0x0C**: Serial Bus Controller
+  - 0x03: USB Controller
+  - 0x05: SMBus
+
+**Example:**
+```rust
+let dev = &pci.devices[0];
+if dev.class_code == 0x01 && dev.subclass == 0x01 {
+    println!("Found IDE controller: {}", dev.class_name());
+}
+```
+
+### PciDevice::vendor_name()
+
+Returns a human-readable vendor name.
+
+```rust
+pub fn vendor_name(&self) -> &'static str
+```
+
+**Recognized vendors:**
+- `0x8086` → Intel
+- `0x1022` → AMD
+- `0x10DE` → NVIDIA
+- `0x1002` → AMD/ATI
+- `0x14E4` → Broadcom
+- `0x1AF4` → VirtIO
+- `0x1234` → QEMU/Bochs
+- `0x106B` → Apple
+- `0x15AD` → VMware
+- `0x80EE` → VirtualBox
+
+**Example:**
+```rust
+if dev.vendor_id == 0x8086 {
+    println!("Intel device: {}", dev.device_id);
+}
+```
+
+---
+
+## PCI Configuration Access
+
+### pci_read32()
+
+Reads a 32-bit value from PCI configuration space.
+
+```rust
+pub unsafe fn pci_read32(
+    bus: u8,
+    dev: u8,
+    func: u8,
+    reg: u8
+) -> u32
+```
+
+<ParamField path="bus" type="u8" required>
+  Bus number
+</ParamField>
+
+<ParamField path="dev" type="u8" required>
+  Device slot
+</ParamField>
+
+<ParamField path="func" type="u8" required>
+  Function number
+</ParamField>
+
+<ParamField path="reg" type="u8" required>
+  Register offset (must be 4-byte aligned)
+</ParamField>
+
+**Configuration address format (port 0xCF8):**
+```
+Bit 31:    Enable bit (1)
+Bits 23-16: Bus number
+Bits 15-11: Device slot
+Bits 10-8:  Function
+Bits 7-2:   Register
+Bits 1-0:   Reserved (0)
+```
+
+**Example:**
+```rust
+unsafe {
+    let vendor_device = pci_read32(0, 0, 0, 0x00);
+    let vendor = (vendor_device & 0xFFFF) as u16;
+    let device = (vendor_device >> 16) as u16;
+    println!("Vendor: {:04X}, Device: {:04X}", vendor, device);
+}
+```
+
+### pci_read8()
+
+Reads an 8-bit value from PCI configuration space.
+
+```rust
+pub unsafe fn pci_read8(
+    bus: u8,
+    dev: u8,
+    func: u8,
+    reg: u8
+) -> u8
+```
+
+**Implementation:** Reads the containing 32-bit dword and extracts the correct byte.
+
+**Example:**
+```rust
+unsafe {
+    let class = pci_read8(0, 1, 0, 0x0B);
+    let subclass = pci_read8(0, 1, 0, 0x0A);
+    println!("Class: {:02X}, Subclass: {:02X}", class, subclass);
+}
+```
+
+---
+
+## ACPI Power Management
+
+### poweroff()
+
+Attempts to power off the machine via ACPI.
+
+```rust
+pub fn poweroff() -> !
+```
+
+**Fallback sequence:**
+1. **QEMU ≥2.x**: Writes `0x2000` to PM1a control register (port 0x604)
+2. **Bochs/old QEMU**: Writes `0x2000` to port 0xB004
+3. **VirtualBox**: Writes `0x3400` to port 0x4004
+4. **Last resort**: Triggers triple-fault via null IDT
+
+<Warning>
+  This function never returns. Use only for clean shutdown.
+</Warning>
+
+**Example:**
+```rust
+println!("Shutting down...");
+acpi::poweroff();
+```
+
+### reboot()
+
+Reboots the machine via keyboard controller.
+
+```rust
+pub fn reboot() -> !
+```
+
+**Reboot sequence:**
+1. Drains keyboard controller input buffer (port 0x64)
+2. Sends pulse CPU reset command `0xFE` to port 0x64
+3. Fallback: Writes `0x01` to ISA reset port 0x92 (QEMU)
+
+<Warning>
+  This function never returns. Use only for system reboot.
+</Warning>
+
+**Example:**
+```rust
+println!("Rebooting...");
+acpi::reboot();
+```
+
+---
+
+## Usage Examples
+
+### Enumerate all PCI devices
+
+```rust
+use portix::drivers::bus::pci::PciBus;
+
+let pci = PciBus::scan();
+
+for i in 0..pci.count {
+    let dev = &pci.devices[i];
+    println!(
+        "[{:02X}:{:02X}.{}] {} {:04X}:{:04X} - {} (IRQ {})",
+        dev.bus, dev.device, dev.function,
+        dev.vendor_name(),
+        dev.vendor_id, dev.device_id,
+        dev.class_name(),
+        if dev.irq_line != 0xFF { dev.irq_line.to_string() } else { "N/A".to_string() }
+    );
+}
+```
+
+### Find an IDE controller
+
+```rust
+let pci = PciBus::scan();
+
+for i in 0..pci.count {
+    let dev = &pci.devices[i];
+    if dev.class_code == 0x01 && dev.subclass == 0x01 {
+        println!("Found IDE controller at {:02X}:{:02X}.{}",
+                 dev.bus, dev.device, dev.function);
+        
+        // Read BAR0 for primary channel I/O base
+        unsafe {
+            let bar0 = pci_read32(dev.bus, dev.device, dev.function, 0x10);
+            println!("Primary channel BAR: {:08X}", bar0);
+        }
+    }
+}
+```
+
+### Shutdown on panic
+
+```rust
+use portix::drivers::bus::acpi;
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    println!("Kernel panic: {}", info);
+    println!("Powering off...");
+    acpi::poweroff();
+}
+```

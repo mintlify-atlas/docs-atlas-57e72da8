@@ -1,0 +1,207 @@
+---
+title: Introduction
+description: Learn about Portix OS, a high-performance bare-metal x86_64 kernel written in Rust
+---
+
+# Welcome to Portix OS
+
+Portix OS is a high-performance **bare-metal x86_64 kernel** written entirely in Rust, designed to run directly on hardware without relying on heavy abstraction layers or third-party bootloaders.
+
+<Note>
+  Portix started as a simple experiment to display "Hello World" in VGA mode and evolved into a complete operating system with advanced memory management, drivers, and a graphical interface.
+</Note>
+
+## What is Portix OS?
+
+Portix is a modern operating system kernel that demonstrates the power of Rust for systems programming. Unlike traditional OS projects that rely on established bootloaders like GRUB or Limine, Portix implements its own custom bootloader and boots directly from BIOS Legacy mode, transitioning seamlessly to Long Mode (64-bit).
+
+### Key Philosophy
+
+- **Zero unnecessary dependencies**: The kernel compiles with a minimal stack (`no_std`), maintaining complete control over every instruction cycle
+- **Custom bootloader**: No third-party dependencies - Portix boots using its own tailored boot stack
+- **Long-term commitment**: This is a serious, long-term project focused on reaching a stable 1.0 release
+
+## Key Features
+
+### Advanced Memory Management
+
+Portix implements a **Buddy System Allocator** with intrusive lists, providing efficient dynamic block allocation while minimizing external fragmentation - critical when every byte counts.
+
+```rust
+#[global_allocator]
+static ALLOCATOR: BuddyAllocator = BuddyAllocator::new();
+```
+
+### Driver Architecture & VFS
+
+#### Storage
+- **ATA driver** with intelligent caching to prevent bus resets
+- Support for **ISO9660 (El Torito)** and **FAT32** file systems
+- Unified **VFS layer** that transparently abstracts file systems
+
+#### Graphics & UI
+- High-performance **VESA framebuffer** with alpha blending
+- Modern, fluid interface with custom UI layer
+- Tab-based system with multiple views (Terminal, IDE, Explorer, System, Devices)
+
+### System Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│              User Interface Layer               │
+│  (Terminal, IDE, File Explorer, System Info)    │
+└─────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────┐
+│         Kernel Services & Drivers               │
+│  • VFS Layer (FAT32, ISO9660)                   │
+│  • ATA Storage Driver                           │
+│  • PS/2 Input (Keyboard & Mouse)                │
+│  • VESA Framebuffer Graphics                    │
+└─────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────┐
+│         Hardware Abstraction Layer              │
+│  • IDT (Interrupt Descriptor Table)             │
+│  • GDT (Global Descriptor Table)                │
+│  • PIC (Programmable Interrupt Controller)      │
+│  • PIT (Programmable Interval Timer)            │
+└─────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────┐
+│              x86_64 Hardware                    │
+└─────────────────────────────────────────────────┘
+```
+
+## System Requirements
+
+### Build Requirements
+
+- **Rust Nightly**: The kernel uses unstable Rust features
+- **NASM**: For assembling boot sector and ISR code
+- **Python 3**: For build scripts
+- **QEMU**: For testing and emulation (qemu-system-x86_64)
+- **LLVM Binutils**: For linking and binary operations
+
+### Runtime Requirements
+
+- **Architecture**: x86_64 (64-bit Intel/AMD processors)
+- **Memory**: Minimum 256 MB RAM
+- **Boot Mode**: BIOS Legacy (non-UEFI)
+- **Display**: VESA-compatible graphics
+
+<Warning>
+  Portix currently supports BIOS Legacy boot only. UEFI support is not yet implemented.
+</Warning>
+
+## Distribution Formats
+
+Portix can be executed and distributed in multiple formats compatible with various virtualization environments:
+
+| Format | Description | Use Case |
+|--------|-------------|----------|
+| **ISO** | CD-ROM bootable image | Testing in VirtualBox/VMware as optical drive |
+| **RAW** | Raw disk image | Direct writing to USB with `dd` or Rufus |
+| **VDI** | VirtualBox disk format | Native VirtualBox virtual machines |
+| **VMDK** | VMware disk format | VMware and VirtualBox compatibility |
+| **VMI** | Virtual Machine Image | Generic VM image format |
+
+## Project Structure
+
+Portix follows a modular architecture that separates hardware communication from high-level logic:
+
+```text
+├── boot/                  # Custom boot stack (ASM)
+│   ├── boot.asm          # Stage 1 bootloader (512 bytes)
+│   └── stage2.asm        # Stage 2 loader (64 sectors)
+├── kernel/                # OS core
+│   ├── Cargo.toml
+│   ├── linker.ld         # Custom linker script
+│   └── src/
+│       ├── arch/         # Hardware bridge (IDT, GDT, ISR)
+│       ├── console/      # Terminal and commands
+│       ├── drivers/      # Peripheral control
+│       │   ├── bus/      # ACPI, PCI
+│       │   ├── input/    # PS/2 Keyboard & Mouse
+│       │   └── storage/  # ATA, FAT32, VFS
+│       ├── graphics/     # Framebuffer & Rendering
+│       ├── mem/          # Buddy Allocator & Heap
+│       ├── time/         # Timers (PIT)
+│       ├── ui/           # Visual UI (Tabs, Chrome)
+│       └── util/         # Utilities
+│       └── main.rs       # Kernel entry point
+├── scripts/              # Build automation
+│   └── build.py          # Main build script
+└── tools/                # Development utilities
+```
+
+## Technical Highlights
+
+### Boot Process
+
+1. **Stage 1** (`boot.asm`): 512-byte MBR bootloader loads Stage 2
+2. **Stage 2** (`stage2.asm`): Transitions from Real Mode → Protected Mode → Long Mode (64-bit)
+3. **Kernel** (`main.rs`): Rust kernel takes control in Long Mode
+
+### Memory Model
+
+The kernel operates in a `no_std` environment with:
+- Custom global allocator (Buddy System)
+- No heap allocations during early boot
+- Manual memory management for hardware structures
+
+```rust
+#![no_std]
+#![no_main]
+#![feature(alloc_error_handler)]
+#![feature(allocator_api)]
+```
+
+### Hardware Initialization Sequence
+
+When Portix boots, it initializes hardware in this order:
+
+1. Clear BSS section and set up stack
+2. Initialize buddy allocator
+3. Set up IDT (Interrupt Descriptor Table)
+4. Initialize serial port (COM1)
+5. Configure PIT (Programmable Interval Timer) to 100 Hz
+6. Enable interrupts
+7. Detect CPU and hardware information
+8. Scan PCI bus
+9. Initialize keyboard and mouse
+10. Set up VESA framebuffer
+11. Scan and initialize ATA drives
+12. Mount or format FAT32 file system
+
+## What's Next?
+
+Ready to build and run Portix? Check out the [Quickstart Guide](/quickstart) to get up and running in minutes.
+
+Want to dive deeper into specific components? Explore our detailed documentation:
+
+- **Architecture**: Learn about the kernel's internal design
+- **Memory Management**: Understand the Buddy Allocator implementation
+- **Driver Development**: Create your own device drivers
+- **Contributing**: Join the development effort
+
+<Info>
+  Portix is under active development. The project is working towards a stable 1.0 release with the philosophy: "It will take as long as it needs, but the 1.0 will be perfect."
+</Info>
+
+## About the Developer
+
+**Portix OS** is developed with passion by **Omar Palomares Velasco**.
+
+> _"It will take as long as it needs, but the 1.0 will be perfect."_
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Get Started" icon="rocket" href="/quickstart">
+    Build and run Portix OS in minutes
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/development/contributing">
+    Join the development effort
+  </Card>
+</CardGroup>

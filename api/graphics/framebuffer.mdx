@@ -1,0 +1,548 @@
+---
+title: Framebuffer API
+description: Low-level graphics framebuffer driver for VESA graphics modes
+icon: "square"
+---
+
+## Overview
+
+The framebuffer module provides direct access to VESA linear framebuffer with hardware-accelerated operations and dirty region tracking for optimal performance.
+
+**Location**: `kernel/src/graphics/driver/framebuffer.rs`
+
+## Core Components
+
+### Framebuffer
+
+The main framebuffer struct managing the backbuffer and hardware video memory.
+
+```rust
+pub struct Framebuffer {
+    lfb:        u64,        // Linear framebuffer address
+    backbuf:    u64,        // Back buffer (0x0060_0000)
+    pub width:  usize,
+    pub height: usize,
+    lfb_pitch:  usize,
+    bpp:        u8,
+    back_pitch: usize,
+    pub dirty:  DirtyRegion,
+}
+```
+
+#### Constructor
+
+```rust
+pub fn new() -> Self
+```
+
+Initializes the framebuffer by reading VESA mode information from memory-mapped addresses and allocating the backbuffer.
+
+**Returns**: A new framebuffer instance with default resolution or VESA detected mode.
+
+---
+
+### Console
+
+High-level console abstraction with text rendering and drawing primitives.
+
+```rust
+pub struct Console {
+    fb:           Framebuffer,
+    pub cursor_x: usize,
+    pub cursor_y: usize,
+    pub margin_x: usize,
+    pub fg_color: Color,
+    pub bg_color: Color,
+    font_w:       usize,      // 8px
+    font_h:       usize,      // 8px
+}
+```
+
+#### Constructor
+
+```rust
+pub fn new() -> Self
+```
+
+Creates a new console with an embedded framebuffer instance.
+
+---
+
+## Color
+
+### Struct Definition
+
+```rust
+pub struct Color(pub u32);  // 0xRRGGBB format
+```
+
+### Predefined Colors
+
+<ParamField path="BLACK" type="Color">
+  `0x000000` - Pure black
+</ParamField>
+
+<ParamField path="WHITE" type="Color">
+  `0xFFFFFF` - Pure white
+</ParamField>
+
+<ParamField path="RED" type="Color">
+  `0xEE2222` - Bright red
+</ParamField>
+
+<ParamField path="GREEN" type="Color">
+  `0x00CC44` - Bright green
+</ParamField>
+
+<ParamField path="BLUE" type="Color">
+  `0x0055FF` - Bright blue
+</ParamField>
+
+<ParamField path="PORTIX_BG" type="Color">
+  `0x01080F` - Main background dark blue
+</ParamField>
+
+<ParamField path="PORTIX_GOLD" type="Color">
+  `0xFFD700` - Accent gold
+</ParamField>
+
+<ParamField path="TAB_ACTIVE" type="Color">
+  `0x0E2240` - Active tab background
+</ParamField>
+
+<ParamField path="GRAY" type="Color">
+  `0x506070` - Medium gray
+</ParamField>
+
+<ParamField path="CYAN" type="Color">
+  `0x00CCEE` - Bright cyan
+</ParamField>
+
+### Color Methods
+
+```rust
+pub const fn new(r: u8, g: u8, b: u8) -> Self
+```
+
+Creates a new color from RGB components.
+
+<ParamField path="r" type="u8" required>
+  Red channel (0-255)
+</ParamField>
+
+<ParamField path="g" type="u8" required>
+  Green channel (0-255)
+</ParamField>
+
+<ParamField path="b" type="u8" required>
+  Blue channel (0-255)
+</ParamField>
+
+---
+
+```rust
+pub const fn dim(self, alpha: u8) -> Self
+```
+
+Dims the color by an alpha factor.
+
+<ParamField path="alpha" type="u8" required>
+  Opacity (0=transparent, 255=opaque)
+</ParamField>
+
+---
+
+```rust
+pub const fn blend(self, other: Color, alpha: u8) -> Self
+```
+
+Blends two colors with alpha blending.
+
+<ParamField path="other" type="Color" required>
+  Background color
+</ParamField>
+
+<ParamField path="alpha" type="u8" required>
+  Blend amount (0=fully other, 255=fully self)
+</ParamField>
+
+---
+
+## Drawing Primitives
+
+### fill_rect
+
+```rust
+pub fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: Color)
+```
+
+Fills a rectangle with solid color using hardware-accelerated `rep stosd`.
+
+<ParamField path="x" type="usize" required>
+  X coordinate (top-left)
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate (top-left)
+</ParamField>
+
+<ParamField path="w" type="usize" required>
+  Width in pixels
+</ParamField>
+
+<ParamField path="h" type="usize" required>
+  Height in pixels
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Fill color
+</ParamField>
+
+**Example:**
+
+```rust
+let mut console = Console::new();
+console.fill_rect(100, 100, 200, 150, Color::PORTIX_GOLD);
+console.present();
+```
+
+---
+
+### draw_line
+
+```rust
+pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color)
+```
+
+Draws a line using Bresenham's algorithm.
+
+<ParamField path="x0" type="i32" required>
+  Start X coordinate
+</ParamField>
+
+<ParamField path="y0" type="i32" required>
+  Start Y coordinate
+</ParamField>
+
+<ParamField path="x1" type="i32" required>
+  End X coordinate
+</ParamField>
+
+<ParamField path="y1" type="i32" required>
+  End Y coordinate
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Line color
+</ParamField>
+
+---
+
+### fill_circle
+
+```rust
+pub fn fill_circle(&mut self, cx: i32, cy: i32, radius: i32, color: Color)
+```
+
+Fills a circle using midpoint circle algorithm.
+
+<ParamField path="cx" type="i32" required>
+  Center X coordinate
+</ParamField>
+
+<ParamField path="cy" type="i32" required>
+  Center Y coordinate
+</ParamField>
+
+<ParamField path="radius" type="i32" required>
+  Radius in pixels
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Fill color
+</ParamField>
+
+---
+
+### fill_rounded
+
+```rust
+pub fn fill_rounded(&mut self, x: usize, y: usize, w: usize, h: usize, radius: usize, color: Color)
+```
+
+Fills a rounded rectangle.
+
+<ParamField path="x" type="usize" required>
+  X coordinate
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate
+</ParamField>
+
+<ParamField path="w" type="usize" required>
+  Width
+</ParamField>
+
+<ParamField path="h" type="usize" required>
+  Height
+</ParamField>
+
+<ParamField path="radius" type="usize" required>
+  Corner radius in pixels
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Fill color
+</ParamField>
+
+---
+
+## Buffer Management
+
+### present
+
+```rust
+pub fn present(&mut self)
+```
+
+Presents the backbuffer to screen using dirty region tracking. Only modified regions are copied to video memory using hardware-accelerated `rep movsd`.
+
+**Performance**: 3-5x faster than naive pixel copy due to:
+- Dirty region optimization
+- x86 `rep movsd` instruction
+- Single-pass scanline copy
+
+**Example:**
+
+```rust
+let mut console = Console::new();
+console.clear(Color::PORTIX_BG);
+console.fill_rect(50, 50, 100, 100, Color::RED);
+console.present();  // Only copies dirty regions
+```
+
+---
+
+### present_full
+
+```rust
+pub fn present_full(&mut self)
+```
+
+Forces a full screen refresh, ignoring dirty region tracking. Use when switching tabs or major UI changes.
+
+---
+
+### clear
+
+```rust
+pub fn clear(&mut self, color: Color)
+```
+
+Clears the entire screen with a solid color and resets cursor position.
+
+<ParamField path="color" type="Color" required>
+  Background color
+</ParamField>
+
+---
+
+## Text Rendering
+
+### write
+
+```rust
+pub fn write(&mut self, text: &str, color: Color)
+```
+
+Writes text at the current cursor position with automatic line wrapping.
+
+<ParamField path="text" type="&str" required>
+  Text to render (supports `\n`, `\t`)
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Text color
+</ParamField>
+
+---
+
+### write_at
+
+```rust
+pub fn write_at(&mut self, text: &str, x: usize, y: usize, color: Color)
+```
+
+Writes text at specific coordinates without moving the cursor.
+
+<ParamField path="text" type="&str" required>
+  Text to render
+</ParamField>
+
+<ParamField path="x" type="usize" required>
+  X coordinate in pixels
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate in pixels
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Text color
+</ParamField>
+
+---
+
+### draw_char
+
+```rust
+fn draw_char(&mut self, x: usize, y: usize, ch: char, fg: Color, bg: Color)
+```
+
+Draws a single character using the 8x8 bitmap font.
+
+**Font**: ASCII 32-127, 8x8 pixels per glyph  
+**Location**: `kernel/src/graphics/render/font.rs:6`
+
+<ParamField path="x" type="usize" required>
+  X coordinate
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate
+</ParamField>
+
+<ParamField path="ch" type="char" required>
+  Character to draw (ASCII 32-127)
+</ParamField>
+
+<ParamField path="fg" type="Color" required>
+  Foreground color
+</ParamField>
+
+<ParamField path="bg" type="Color" required>
+  Background color
+</ParamField>
+
+---
+
+## Layout
+
+Responsive layout calculator for UI chrome elements.
+
+```rust
+pub struct Layout {
+    pub fw:        usize,  // Frame width
+    pub fh:        usize,  // Frame height
+    pub header_h:  usize,  // Header height
+    pub tab_h:     usize,  // Tab bar height
+    pub content_y: usize,  // Content area start Y
+    pub bottom_y:  usize,  // Bottom bar Y
+    pub status_h:  usize,  // Status bar height
+    pub font_w:    usize,  // Font width (8)
+    pub font_h:    usize,  // Font height (8)
+    // ... more fields
+}
+```
+
+### Constructor
+
+```rust
+pub fn new(fw: usize, fh: usize) -> Self
+```
+
+Calculates responsive layout proportions based on framebuffer dimensions.
+
+<ParamField path="fw" type="usize" required>
+  Framebuffer width
+</ParamField>
+
+<ParamField path="fh" type="usize" required>
+  Framebuffer height
+</ParamField>
+
+**Example:**
+
+```rust
+let console = Console::new();
+let layout = Layout::new(console.width(), console.height());
+
+// Draw header
+console.fill_rect(0, 0, layout.fw, layout.header_h, Color::PORTIX_PANEL);
+```
+
+---
+
+## DirtyRegion
+
+Tracks modified screen regions for optimized blitting.
+
+```rust
+pub struct DirtyRegion {
+    pub min_x: usize,
+    pub min_y: usize,
+    pub max_x: usize,
+    pub max_y: usize,
+    pub dirty: bool,
+}
+```
+
+### Methods
+
+```rust
+pub fn mark(&mut self, x: usize, y: usize, w: usize, h: usize)
+```
+
+Marks a region as dirty.
+
+```rust
+pub fn reset(&mut self)
+```
+
+Resets dirty tracking after present.
+
+---
+
+## Performance Optimizations
+
+### Hardware Acceleration
+
+The framebuffer uses x86_64 SIMD instructions for maximum performance:
+
+```rust
+#[cfg(target_arch = "x86_64")]
+unsafe fn fast_fill_u32(dst: *mut u32, val: u32, count: usize) {
+    core::arch::asm!(
+        "cld", "rep stosd",
+        inout("rdi") dst   => _,
+        inout("ecx") count => _,
+        in("eax")    val,
+    );
+}
+```
+
+### Alpha LUT
+
+Pre-computed alpha multiplication lookup table eliminates divisions:
+
+```rust
+static mut ALPHA_LUT: [[u8; 256]; 256];
+
+pub fn init_alpha_lut()  // Called during framebuffer initialization
+```
+
+### Bayer Dithering
+
+4x4 ordered dithering matrix for gradient rendering:
+
+```rust
+const BAYER_4X4: [[u8; 4]; 4] = [
+    [ 0,  8,  2, 10],
+    [12,  4, 14,  6],
+    [ 3, 11,  1,  9],
+    [15,  7, 13,  5],
+];
+```
+
+Used in `fill_gradient_dither()` for smooth gradients without color banding.

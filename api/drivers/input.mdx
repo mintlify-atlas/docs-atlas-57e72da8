@@ -1,0 +1,473 @@
+---
+title: Input Drivers
+description: PS/2 keyboard and mouse drivers for bare-metal x86_64
+---
+
+# Input Drivers
+
+Portix OS provides PS/2 keyboard and mouse drivers with scancode decoding, modifier tracking, and button state management.
+
+---
+
+## Keyboard
+
+### KeyboardState
+
+Tracks keyboard state including modifiers, scancodes, and extended key sequences.
+
+```rust
+pub struct KeyboardState
+```
+
+**Internal state:**
+- Shift (left/right)
+- Caps Lock
+- Ctrl
+- Alt
+- E0 prefix (for extended keys)
+
+### KeyboardState::new()
+
+Creates a new keyboard state.
+
+```rust
+pub const fn new() -> Self
+```
+
+**Example:**
+```rust
+let mut kbd = KeyboardState::new();
+```
+
+### KeyboardState::feed_byte()
+
+Processes a single scancode byte from the PS/2 buffer.
+
+```rust
+pub fn feed_byte(&mut self, sc: u8) -> Option<Key>
+```
+
+<ParamField path="sc" type="u8" required>
+  Scancode byte from port 0x60
+</ParamField>
+
+**Returns:** `Some(Key)` when a complete key press is decoded, `None` for modifier changes or multi-byte sequences.
+
+<Info>
+  Use this method when implementing unified PS/2 buffer draining. The caller must read from port 0x60 and verify AUXB=0 before calling.
+</Info>
+
+**Example:**
+```rust
+unsafe {
+    let status = inb(0x64);
+    if status & 0x01 != 0 && status & 0x20 == 0 {
+        let scancode = inb(0x60);
+        if let Some(key) = kbd.feed_byte(scancode) {
+            handle_key(key);
+        }
+    }
+}
+```
+
+### KeyboardState::poll()
+
+Polls the keyboard hardware directly.
+
+```rust
+pub fn poll(&mut self) -> Option<Key>
+```
+
+<Warning>
+  **Do not use with unified buffer draining.** This method reads directly from port 0x60. 
+  If both `KeyboardState::poll()` and `MouseState` polling are active, they will compete for the same buffer and lose bytes.
+  
+  Use `feed_byte()` instead with a unified drain loop.
+</Warning>
+
+**Returns:** `Some(Key)` if a key was pressed, `None` otherwise.
+
+### KeyboardState::ctrl()
+
+Returns true if Ctrl is currently held.
+
+```rust
+pub fn ctrl(&self) -> bool
+```
+
+### KeyboardState::alt()
+
+Returns true if Alt is currently held.
+
+```rust
+pub fn alt(&self) -> bool
+```
+
+**Example:**
+```rust
+if kbd.ctrl() && key == Key::Char(b'c') {
+    // Handle Ctrl+C
+}
+```
+
+---
+
+## Key
+
+Represents a decoded keyboard key.
+
+```rust
+pub enum Key {
+    Char(u8),
+    Enter,
+    Backspace,
+    Tab,
+    Escape,
+    Up, Down, Left, Right,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10,
+    Delete, Home, End, PageUp, PageDown, Insert,
+}
+```
+
+<ResponseField name="Char(u8)">
+  Printable ASCII character with Shift/Caps Lock applied
+</ResponseField>
+
+<ResponseField name="Enter">
+  Enter/Return key (scancode 0x1C)
+</ResponseField>
+
+<ResponseField name="Backspace">
+  Backspace key (scancode 0x0E)
+</ResponseField>
+
+<ResponseField name="Tab">
+  Tab key (scancode 0x0F)
+</ResponseField>
+
+<ResponseField name="Escape">
+  Escape key (scancode 0x01)
+</ResponseField>
+
+<ResponseField name="Up/Down/Left/Right">
+  Arrow keys (scancodes 0x48/0x50/0x4B/0x4D or E0 prefix)
+</ResponseField>
+
+<ResponseField name="F1..F10">
+  Function keys (scancodes 0x3B..0x44)
+</ResponseField>
+
+<ResponseField name="Delete/Home/End/PageUp/PageDown/Insert">
+  Extended navigation keys (E0 prefix)
+</ResponseField>
+
+**Example:**
+```rust
+match key {
+    Key::Char(ch) => print!("{}", ch as char),
+    Key::Enter => println!(),
+    Key::Backspace => handle_backspace(),
+    Key::Up => cursor_up(),
+    _ => {}
+}
+```
+
+---
+
+## Mouse
+
+### MouseState
+
+Tracks PS/2 mouse position, buttons, and internal packet state.
+
+```rust
+pub struct MouseState {
+    pub x: i32,
+    pub y: i32,
+    pub buttons: u8,
+    pub prev_buttons: u8,
+    pub max_x: i32,
+    pub max_y: i32,
+    pub present: bool,
+    pub has_wheel: bool,
+    pub scroll_delta: i32,
+    pub error_count: u32,
+    pub resets: u32,
+}
+```
+
+<ResponseField name="x" type="i32">
+  Current cursor X coordinate (clamped to 0..max_x)
+</ResponseField>
+
+<ResponseField name="y" type="i32">
+  Current cursor Y coordinate (clamped to 0..max_y)
+</ResponseField>
+
+<ResponseField name="buttons" type="u8">
+  Current button state bitmask (bit 0=left, 1=right, 2=middle)
+</ResponseField>
+
+<ResponseField name="prev_buttons" type="u8">
+  Previous frame's button state (for click detection)
+</ResponseField>
+
+<ResponseField name="max_x/max_y" type="i32">
+  Screen bounds (set via `init()`)
+</ResponseField>
+
+<ResponseField name="present" type="bool">
+  True if mouse was successfully initialized
+</ResponseField>
+
+<ResponseField name="has_wheel" type="bool">
+  True if scroll wheel is supported (not yet implemented)
+</ResponseField>
+
+<ResponseField name="error_count" type="u32">
+  Cumulative error count (decreases on successful packets)
+</ResponseField>
+
+<ResponseField name="resets" type="u32">
+  Number of times the mouse has been reset
+</ResponseField>
+
+### MouseState::new()
+
+Creates a new mouse state.
+
+```rust
+pub const fn new() -> Self
+```
+
+**Default position:** (400, 300)  
+**Default bounds:** 1024×768
+
+### MouseState::init()
+
+Initializes the PS/2 mouse hardware.
+
+```rust
+pub fn init(&mut self, sw: usize, sh: usize) -> bool
+```
+
+<ParamField path="sw" type="usize" required>
+  Screen width in pixels
+</ParamField>
+
+<ParamField path="sh" type="usize" required>
+  Screen height in pixels
+</ParamField>
+
+**Returns:** `true` if initialization succeeded, `false` otherwise.
+
+**Initialization steps:**
+1. Drains the keyboard controller buffer
+2. Enables the auxiliary (mouse) device (command 0xA8)
+3. Configures interrupts in the controller configuration byte
+4. Sends mouse reset (0xF6) and set defaults (0xF3 100)
+5. Enables data reporting (0xF4)
+
+**Example:**
+```rust
+let mut ms = MouseState::new();
+if !ms.init(1024, 768) {
+    panic!("Failed to initialize mouse");
+}
+```
+
+### MouseState::begin_frame()
+
+Prepares for a new polling frame.
+
+```rust
+pub fn begin_frame(&mut self)
+```
+
+**Actions:**
+- Copies `buttons` to `prev_buttons`
+- Resets `scroll_delta` to 0
+
+<Info>
+  Call once per frame before calling `feed()`. This is required for click detection to work correctly.
+</Info>
+
+**Example (main loop):**
+```rust
+loop {
+    ms.begin_frame();
+    
+    // Drain PS/2 buffer
+    unsafe {
+        while inb(0x64) & 0x01 != 0 {
+            let status = inb(0x64);
+            let byte = inb(0x60);
+            if status & 0x20 != 0 {
+                ms.feed(byte);
+            }
+        }
+    }
+    
+    // Handle mouse state
+    if ms.left_clicked() {
+        handle_click(ms.x, ms.y);
+    }
+}
+```
+
+### MouseState::feed()
+
+Processes a single byte from the PS/2 mouse.
+
+```rust
+pub fn feed(&mut self, byte: u8) -> bool
+```
+
+<ParamField path="byte" type="u8" required>
+  Byte from port 0x60 (caller must verify AUXB=1 in status register)
+</ParamField>
+
+**Returns:** `true` if a complete 3-byte packet was received and the mouse moved or buttons changed.
+
+**PS/2 Mouse Packet Format:**
+- Byte 0: Flags (bit 3=always 1, bit 4=X sign, bit 5=Y sign, bits 0-2=buttons)
+- Byte 1: X movement (low 8 bits)
+- Byte 2: Y movement (low 8 bits)
+
+**Error handling:**
+- Rejects packets with flags bit 3 = 0 (sync error)
+- Rejects deltas > 120 pixels (teleport threshold)
+- Rejects packets with overflow bits (0xC0) set
+- Automatically resets after 25 errors
+
+**Sensitivity:** 2× (configurable in source)
+
+### MouseState::intelligent_reset()
+
+Resets the mouse hardware if errors accumulate.
+
+```rust
+pub fn intelligent_reset(&mut self)
+```
+
+**Throttling:** Only resets once per 100 ticks (prevents reset storms).
+
+**Actions:**
+1. Drains buffer
+2. Sends reset defaults (0xF6)
+3. Re-enables data reporting (0xF4)
+4. Clears error count and packet index
+5. Increments reset counter
+
+**Called automatically when `error_count >= 25` during packet processing.**
+
+---
+
+## Mouse Button Queries
+
+### MouseState::left_btn()
+
+Returns true if left button is currently pressed.
+
+```rust
+pub fn left_btn(&self) -> bool
+```
+
+### MouseState::right_btn()
+
+Returns true if right button is currently pressed.
+
+```rust
+pub fn right_btn(&self) -> bool
+```
+
+### MouseState::middle_btn()
+
+Returns true if middle button is currently pressed.
+
+```rust
+pub fn middle_btn(&self) -> bool
+```
+
+### MouseState::left_clicked()
+
+Returns true if left button was **just pressed** this frame.
+
+```rust
+pub fn left_clicked(&self) -> bool
+```
+
+**Condition:** `buttons & 0x01 != 0 && prev_buttons & 0x01 == 0`
+
+### MouseState::right_clicked()
+
+Returns true if right button was just pressed this frame.
+
+```rust
+pub fn right_clicked(&self) -> bool
+```
+
+### MouseState::left_released()
+
+Returns true if left button was just released this frame.
+
+```rust
+pub fn left_released(&self) -> bool
+```
+
+**Example:**
+```rust
+if ms.left_clicked() {
+    start_drag(ms.x, ms.y);
+}
+if ms.left_released() {
+    end_drag();
+}
+```
+
+---
+
+## Unified Buffer Draining
+
+The recommended approach for handling both keyboard and mouse:
+
+```rust
+let mut kbd = KeyboardState::new();
+let mut ms = MouseState::new();
+ms.init(1024, 768);
+
+loop {
+    ms.begin_frame();
+    
+    unsafe {
+        // Drain the PS/2 buffer completely
+        while inb(0x64) & 0x01 != 0 {
+            let status = inb(0x64);
+            let byte = inb(0x60);
+            
+            if status & 0x20 != 0 {
+                // AUXB=1: mouse byte
+                if ms.feed(byte) {
+                    render_cursor(ms.x, ms.y);
+                }
+            } else {
+                // AUXB=0: keyboard byte
+                if let Some(key) = kbd.feed_byte(byte) {
+                    handle_key(key);
+                }
+            }
+        }
+    }
+    
+    // Intelligent mouse reset if needed
+    if ms.error_count >= 25 {
+        ms.intelligent_reset();
+    }
+}
+```
+
+**Benefits:**
+- No lost bytes from buffer competition
+- Single drain loop per frame
+- Correct button state tracking
+- Automatic error recovery

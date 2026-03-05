@@ -1,0 +1,504 @@
+---
+title: 'Memory Management'
+description: 'Buddy system allocator and heap management in Portix OS'
+icon: 'memory'
+---
+
+## Overview
+
+Portix OS implements a **Buddy System Allocator** for dynamic memory management. This allocator provides O(log N) allocation and deallocation, automatic coalescing of free blocks, and minimal external fragmentation.
+
+<Info>
+  The allocator implements Rust's `GlobalAlloc` trait, making it compatible with Rust's standard allocation APIs (`Box`, `Vec`, `String`, etc.) even in a `no_std` environment.
+</Info>
+
+## Buddy System Design
+
+### Concept
+
+The buddy system divides memory into blocks whose sizes are powers of two. When a block is split, it creates two "buddies" - blocks of equal size that are adjacent in memory. When both buddies are free, they can be merged back together.
+
+```
+Initial: [────────── 1 MB Block ──────────]
+
+After splits:
+[─ 512K ─][─ 512K ─]
+           [─256K─][─256K─]
+                   [128K][128K]
+                   [64][64]
+```
+
+### Order Levels
+
+Portix defines memory orders from 12 to 30:
+
+```rust kernel/src/mem/allocator.rs
+pub const MIN_ORDER: usize = 12;    // 4 KB (2^12)
+pub const MAX_ORDER: usize = 30;    // 1 GB (2^30)
+pub const ORDER_COUNT: usize = MAX_ORDER - MIN_ORDER + 1;  // 19 orders
+```
+
+| Order | Block Size | Use Case |
+|-------|------------|----------|
+| 12 | 4 KB | Small allocations, page frames |
+| 13 | 8 KB | Stack frames |
+| 14 | 16 KB | Small data structures |
+| 15 | 32 KB | Medium allocations |
+| 16 | 64 KB | Large strings/buffers |
+| 20 | 1 MB | Framebuffer pages |
+| 30 | 1 GB | Maximum single allocation |
+
+### Heap Configuration
+
+The heap is configured at compile time:
+
+```rust kernel/src/mem/mod.rs
+pub const HEAP_START: usize = 0x400000;      // 4 MB physical
+pub const HEAP_SIZE: usize  = 64 * 1024 * 1024;  // 64 MB
+```
+
+<Warning>
+  The heap must be placed at an address aligned to `HEAP_SIZE`. Misalignment will cause incorrect buddy calculations.
+</Warning>
+
+## Data Structures
+
+### Free List Node
+
+Free blocks are organized into doubly-linked lists:
+
+```rust kernel/src/mem/allocator.rs
+#[repr(C)]
+struct FreeNode {
+    next: *mut FreeNode,
+    prev: *mut FreeNode,
+}
+
+impl FreeNode {
+    #[inline]
+    unsafe fn init(ptr: *mut u8) -> *mut FreeNode {
+        let node = ptr as *mut FreeNode;
+        (*node).next = ptr::null_mut();
+        (*node).prev = ptr::null_mut();
+        node
+    }
+}
+```
+
+Each free block stores a `FreeNode` at its beginning, forming an intrusive linked list. This means:
+- No separate metadata allocations needed
+- Minimum block size is `sizeof(FreeNode)` = 16 bytes
+- Zero external fragmentation for metadata
+
+### Allocator State
+
+```rust kernel/src/mem/allocator.rs
+struct BuddyInner {
+    free_lists: [*mut FreeNode; ORDER_COUNT],
+}
+
+pub struct BuddyAllocator {
+    inner:   core::cell::UnsafeCell<BuddyInner>,
+    inited:  AtomicBool,
+    locked:  AtomicBool,
+}
+```
+
+The allocator maintains:
+- **19 free lists** (one per order)
+- **Initialization flag** (prevents use before init)
+- **Spinlock** (provides mutual exclusion)
+
+<Note>
+  Portix uses a spinlock instead of a mutex because the kernel is single-threaded and runs with interrupts disabled during allocations.
+</Note>
+
+## Initialization
+
+### Heap Setup
+
+The allocator is initialized during kernel startup:
+
+```rust kernel/src/mem/allocator.rs
+pub unsafe fn init(&self) {
+    if self.inited.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    serial::log_level(Level::Info, "HEAP", "Inicializando buddy allocator...");
+    serial::write_str("[  INF ] HEAP  rango: ");
+    serial::write_hex(HEAP_START);
+    serial::write_str(" - ");
+    serial::write_hex(HEAP_START + HEAP_SIZE);
+    serial::write_byte(b'\n');
+
+    let inner = &mut *self.inner.get();
+    let mut addr  = HEAP_START;
+    let end       = HEAP_START + HEAP_SIZE;
+    let mut count = 0usize;
+
+    while addr < end {
+        let remaining = end - addr;
+        let mut ord = MAX_ORDER;
+        loop {
+            let sz = 1usize << ord;
+            if sz <= remaining && (addr & (sz - 1)) == 0 {
+                break;
+            }
+            if ord == MIN_ORDER { break; }
+            ord -= 1;
+        }
+        let sz = 1usize << ord;
+
+        // Log each initial block
+        serial::write_str("[  INF ] HEAP  bloque ord=");
+        serial::write_u32(ord as u32);
+        serial::write_str(" sz=");
+        serial::write_usize(sz >> 10); // KiB
+        serial::write_str("K @ ");
+        serial::write_hex(addr);
+        serial::write_byte(b'\n');
+
+        inner_push(inner, ord, addr as *mut u8);
+        ALLOC_STATS.free_blocks[ord_idx(ord)].fetch_add(1, Ordering::Relaxed);
+        addr  += sz;
+        count += 1;
+    }
+
+    serial::write_str("[   OK ] HEAP  listo — ");
+    serial::write_usize(count);
+    serial::write_str(" bloques libres, ");
+    serial::write_usize(HEAP_SIZE >> 10);
+    serial::write_str(" KiB totales\n");
+}
+```
+
+This algorithm:
+1. Finds the largest power-of-2 block that fits at the current address
+2. Ensures the block is aligned to its size
+3. Adds it to the appropriate free list
+4. Advances to the next address
+5. Repeats until the entire heap is carved up
+
+<Accordion title="Example Initialization Output">
+  ```
+  [  INF ] HEAP  rango: 0x400000 - 0x4400000
+  [  INF ] HEAP  bloque ord=26 sz=65536K @ 0x400000
+  [   OK ] HEAP  listo — 1 bloques libres, 65536 KiB totales
+  ```
+  
+  In this example, the 64 MB heap starts at 4 MB and is initialized as a single order-26 block (64 MB).
+</Accordion>
+
+## Allocation Algorithm
+
+### Finding a Block
+
+When allocating, the allocator:
+
+1. **Determines the required order** (smallest power-of-2 ≥ requested size)
+2. **Searches for a free block** at that order or higher
+3. **Splits larger blocks** if necessary
+4. **Returns the block pointer**
+
+```rust kernel/src/mem/allocator.rs
+unsafe fn buddy_alloc(inner: &mut BuddyInner, order: usize) -> *mut u8 {
+    // Find smallest available block >= requested order
+    let mut found_ord = MAX_ORDER + 1;
+    for o in order..=MAX_ORDER {
+        if !inner.free_lists[ord_idx(o)].is_null() {
+            found_ord = o;
+            break;
+        }
+    }
+    if found_ord > MAX_ORDER {
+        return ptr::null_mut();
+    }
+
+    // Remove block from free list
+    let ptr = inner_pop(inner, found_ord).unwrap();
+    let mut cur_ord = found_ord;
+
+    // Split block down to requested order
+    while cur_ord > order {
+        cur_ord -= 1;
+        let buddy_ptr = (ptr as usize + (1 << cur_ord)) as *mut u8;
+        inner_push(inner, cur_ord, buddy_ptr);
+        // Update stats
+        ALLOC_STATS.free_blocks[ord_idx(cur_ord)].fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(target_arch = "x86_64")]
+        core::arch::x86_64::_mm_prefetch(
+            buddy_ptr as *const i8,
+            core::arch::x86_64::_MM_HINT_T0,
+        );
+    }
+    ptr
+}
+```
+
+### Splitting Example
+
+Suppose we request 16 KB (order 14) but only a 64 KB block (order 16) is available:
+
+```
+Step 1: Pop 64 KB block from order 16
+[────────── 64 KB ──────────]
+
+Step 2: Split into two 32 KB buddies (order 15)
+[──── 32 KB ────][──── 32 KB ────]
+                 ^ Push right buddy to order 15 free list
+
+Step 3: Split left 32 KB into two 16 KB buddies (order 14)
+[─ 16 KB ─][─ 16 KB ─][──── 32 KB ────]
+           ^ Push right buddy to order 14 free list
+
+Step 4: Return left 16 KB block to caller
+```
+
+### GlobalAlloc Implementation
+
+```rust kernel/src/mem/allocator.rs
+unsafe impl GlobalAlloc for BuddyAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if !self.inited.load(Ordering::Acquire) {
+            return ptr::null_mut();
+        }
+        
+        // Round up to order size
+        let need  = layout.size().max(layout.align()).max(1 << MIN_ORDER);
+        let order = order_for(need);
+        
+        if order > MAX_ORDER {
+            ALLOC_STATS.failed_allocs.fetch_add(1, Ordering::Relaxed);
+            return ptr::null_mut();
+        }
+
+        self.lock();
+        let result = buddy_alloc(&mut *self.inner.get(), order);
+        self.unlock();
+
+        if result.is_null() {
+            ALLOC_STATS.failed_allocs.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ALLOC_STATS.total_allocs.fetch_add(1, Ordering::Relaxed);
+            ALLOC_STATS.free_blocks[ord_idx(order)].fetch_sub(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    // ... dealloc, alloc_zeroed, realloc ...
+}
+```
+
+<Info>
+  The allocator automatically handles alignment requirements by rounding up to the nearest power-of-2 that satisfies both size and alignment constraints.
+</Info>
+
+## Deallocation Algorithm
+
+### Coalescing Buddies
+
+When freeing a block, the allocator attempts to merge it with its buddy:
+
+```rust kernel/src/mem/allocator.rs
+unsafe fn buddy_free(inner: &mut BuddyInner, ptr: *mut u8, order: usize) {
+    let mut addr = ptr as usize;
+    let mut ord  = order;
+    let mut merges = 0u32;
+
+    loop {
+        if ord >= MAX_ORDER { break; }
+        
+        // Calculate buddy address
+        let buddy_addr = buddy_of(addr, ord);
+        
+        // Check if buddy is in valid range
+        if buddy_addr < HEAP_START || buddy_addr >= HEAP_START + HEAP_SIZE { 
+            break; 
+        }
+        
+        // Check if buddy is free
+        if !find_buddy(inner, ord, buddy_addr) { 
+            break; 
+        }
+
+        // Remove buddy from free list
+        inner_remove(inner, ord, buddy_addr as *mut u8);
+        ALLOC_STATS.free_blocks[ord_idx(ord)].fetch_sub(1, Ordering::Relaxed);
+
+        // Merge: smaller address becomes the merged block
+        addr  = addr.min(buddy_addr);
+        ord  += 1;
+        merges += 1;
+    }
+
+    // Add merged block to free list
+    inner_push(inner, ord, addr as *mut u8);
+}
+```
+
+### Buddy Calculation
+
+The buddy of a block is calculated by XORing its offset with its size:
+
+```rust kernel/src/mem/allocator.rs
+#[inline(always)]
+fn buddy_of(addr: usize, order: usize) -> usize {
+    let size   = 1usize << order;
+    let offset = addr - HEAP_START;
+    HEAP_START + (offset ^ size)
+}
+```
+
+This works because:
+- Blocks at order N are aligned to `2^N`
+- The buddy is always at `address ± 2^N`
+- XOR with the size flips the appropriate bit
+
+### Coalescing Example
+
+Suppose we free a 16 KB block and its buddy is also free:
+
+```
+Step 1: Free 16 KB block at 0x400000
+[─ 16 KB ─][─ 16 KB ─] <- Both free
+   Free       Free
+
+Step 2: Calculate buddy address
+buddy = 0x400000 ^ 0x4000 = 0x404000 ✓ Also free!
+
+Step 3: Merge into 32 KB block
+[──── 32 KB ────]
+      Free
+
+Step 4: Check if 32 KB buddy is free (at 0x408000)
+If yes, continue merging...
+```
+
+## Statistics
+
+The allocator tracks statistics using lock-free atomic counters:
+
+```rust kernel/src/mem/allocator.rs
+pub struct AllocStats {
+    pub total_allocs:  AtomicUsize,
+    pub total_frees:   AtomicUsize,
+    pub failed_allocs: AtomicUsize,
+    pub free_blocks:   [AtomicUsize; ORDER_COUNT],
+}
+
+pub static ALLOC_STATS: AllocStats = AllocStats::new();
+```
+
+These can be queried at runtime:
+
+```rust
+let allocs = ALLOC_STATS.total_allocs.load(Ordering::Relaxed);
+let frees  = ALLOC_STATS.total_frees.load(Ordering::Relaxed);
+let failed = ALLOC_STATS.failed_allocs.load(Ordering::Relaxed);
+
+for i in 0..ORDER_COUNT {
+    let free_count = ALLOC_STATS.free_blocks[i].load(Ordering::Relaxed);
+    println!("Order {}: {} free blocks", MIN_ORDER + i, free_count);
+}
+```
+
+## Performance Characteristics
+
+<CardGroup cols={2}>
+  <Card title="Allocation" icon="bolt">
+    **O(log N)** where N is the number of orders. Maximum ~19 iterations to find and split a block.
+  </Card>
+  <Card title="Deallocation" icon="bolt">
+    **O(log N)** for coalescing. Each merge moves up one order level.
+  </Card>
+  <Card title="External Fragmentation" icon="chart-pie">
+    **Minimal** - Only occurs when the required size is not a power of 2. Worst case: 50% waste for size just over a power of 2.
+  </Card>
+  <Card title="Internal Fragmentation" icon="chart-pie">
+    **Bounded** - At most 2x the requested size (e.g., requesting 33 KB allocates 64 KB).
+  </Card>
+</CardGroup>
+
+## Debugging Support
+
+In debug builds, the allocator logs all operations:
+
+```rust kernel/src/mem/allocator.rs
+#[cfg(debug_assertions)]
+{
+    serial::write_str("[ DBG ] HEAP  alloc ord=");
+    serial::write_u32(order as u32);
+    serial::write_str(" @ ");
+    serial::write_hex(result as usize);
+    serial::write_byte(b'\n');
+}
+```
+
+Merge operations are also logged:
+
+```rust kernel/src/mem/allocator.rs
+#[cfg(debug_assertions)]
+if merges > 0 {
+    serial::write_str("[ DBG ] HEAP  merge x");
+    serial::write_u32(merges);
+    serial::write_str(" → ord=");
+    serial::write_u32(ord as u32);
+    serial::write_byte(b'\n');
+}
+```
+
+<Tip>
+  Enable debug output by connecting a serial port and monitoring COM1 at 38400 baud. This provides real-time insight into allocator behavior.
+</Tip>
+
+## Thread Safety
+
+The allocator uses a spinlock for mutual exclusion:
+
+```rust kernel/src/mem/allocator.rs
+#[inline(always)]
+fn lock(&self) {
+    while self.locked
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline(always)]
+fn unlock(&self) {
+    self.locked.store(false, Ordering::Release);
+}
+```
+
+<Warning>
+  Never call allocation functions with interrupts disabled for extended periods, as this can cause IRQ handlers to spin waiting for the lock.
+</Warning>
+
+## Future Improvements
+
+Possible enhancements to the allocator:
+
+- **SLAB allocator** for small fixed-size objects (< 4 KB)
+- **Per-CPU free lists** to reduce contention in multi-core scenarios
+- **Lazy coalescing** to amortize merge costs
+- **Bitmaps** instead of linked lists for faster buddy lookups
+- **Huge pages** (2 MB / 1 GB) for large allocations
+
+## Summary
+
+Portix's buddy allocator provides:
+
+✅ Fast O(log N) allocation and deallocation  
+✅ Automatic memory coalescing  
+✅ Minimal fragmentation  
+✅ Lock-free statistics  
+✅ Debug logging support  
+✅ Full compatibility with Rust's allocation APIs
+
+<Tip>
+  For deep dives into the implementation, read `kernel/src/mem/allocator.rs:1-407` - every function is documented and optimized for bare-metal performance.
+</Tip>

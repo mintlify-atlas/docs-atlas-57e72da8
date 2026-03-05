@@ -1,80 +1,517 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build and run Portix OS on your system in minutes
 ---
 
-## Get started in three steps
+# Quickstart Guide
 
-Get your documentation site running locally and make your first customization.
+Get Portix OS up and running on your system in just a few minutes. This guide walks you through installing prerequisites, building the kernel, and running it in QEMU.
 
-### Step 1: Set up your local environment
+## Prerequisites
+
+Before building Portix, ensure you have the following tools installed on your system:
+
+### Required Tools
+
+<Steps>
+  <Step title="Install Rust Nightly">
+    Portix uses unstable Rust features that require the nightly toolchain.
+
+    ```bash
+    # Install Rust if you haven't already
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+    # Install nightly toolchain
+    rustup toolchain install nightly
+
+    # Add rust-src component for core library
+    rustup component add rust-src --toolchain nightly
+    ```
+
+    <Note>
+      The `rust-src` component is required because Portix compiles its own `core` and `alloc` libraries for the bare-metal target.
+    </Note>
+  </Step>
+
+  <Step title="Install NASM">
+    NASM is required to assemble the bootloader and interrupt service routines.
+
+    <CodeGroup>
+      ```bash Ubuntu/Debian
+      sudo apt-get update
+      sudo apt-get install nasm
+      ```
+
+      ```bash Arch Linux
+      sudo pacman -S nasm
+      ```
+
+      ```bash macOS
+      brew install nasm
+      ```
+
+      ```bash Windows (using Chocolatey)
+      choco install nasm
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Install Python 3">
+    Python 3 is used by the build scripts.
+
+    <CodeGroup>
+      ```bash Ubuntu/Debian
+      sudo apt-get install python3
+      ```
+
+      ```bash Arch Linux
+      sudo pacman -S python
+      ```
+
+      ```bash macOS
+      brew install python3
+      ```
+
+      ```bash Windows
+      # Download from python.org
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Install QEMU">
+    QEMU is used to test and run the operating system in a virtual environment.
+
+    <CodeGroup>
+      ```bash Ubuntu/Debian
+      sudo apt-get install qemu-system-x86
+      ```
+
+      ```bash Arch Linux
+      sudo pacman -S qemu
+      ```
+
+      ```bash macOS
+      brew install qemu
+      ```
+
+      ```bash Windows (using Chocolatey)
+      choco install qemu
+      ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Install LLVM Binutils (objcopy)">
+    Required for binary manipulation during the build process.
+
+    <CodeGroup>
+      ```bash Ubuntu/Debian
+      sudo apt-get install llvm binutils
+      # Or for cross-compilation:
+      sudo apt-get install mingw-w64
+      ```
+
+      ```bash Arch Linux
+      sudo pacman -S llvm binutils
+      ```
+
+      ```bash macOS
+      brew install llvm binutils
+      ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+### Optional Tools
+
+These tools are optional but provide additional functionality:
+
+- **xorriso** or **genisoimage**: For creating proper ISO9660 CD-ROM images with El Torito boot
+- **qemu-img**: For generating VDI and VMDK disk formats
+- **pycdlib**: Python library for ISO generation (`pip install pycdlib`)
+
+<Warning>
+  Without `xorriso`, `genisoimage`, or `pycdlib`, the build script will create a raw disk copy as the ISO file, which won't work as a CD-ROM in some virtualization software.
+</Warning>
+
+## Building Portix OS
+
+<Steps>
+  <Step title="Clone the Repository">
+    ```bash
+    git clone https://github.com/yourusername/portix-os.git
+    cd portix-os
+    ```
+  </Step>
+
+  <Step title="Run the Build Script">
+    The build script handles everything: assembling the bootloader, compiling the kernel, and creating disk images.
+
+    ```bash
+    python scripts/build.py
+    ```
+
+    This command will:
+    1. Verify all required tools are installed
+    2. Assemble `boot.asm` (Stage 1 bootloader)
+    3. Compile the Rust kernel with custom target
+    4. Assemble `stage2.asm` (Stage 2 loader)
+    5. Create a raw disk image (`portix.img`)
+    6. Generate ISO, VDI, and VMDK formats
+    7. Automatically launch QEMU
+
+    <Note>
+      The build process uses Rust's `-Z build-std` flag to compile `core` and `alloc` from source for the bare-metal target.
+    </Note>
+  </Step>
+
+  <Step title="Build Output">
+    After a successful build, you'll see output similar to:
+
+    ```
+    ╔══════════════════════════════════════════════════╗
+    ║         PORTIX BUILD SYSTEM  v4.4                ║
+    ║  Genera: IMG · ISO · VDI · VMDK · SIM            ║
+    ╚══════════════════════════════════════════════════╝
+
+    [OK]    boot.bin — 512 bytes
+    [OK]    isr.o — 2048 bytes
+    [OK]    kernel.bin — 245760 bytes → 481 sectores
+    [OK]    stage2.bin — 32768 bytes (64 sectores)
+    [OK]    portix.img — 8.0 MB
+    [OK]    dist/portix.iso — 8.5 MB
+    [OK]    dist/portix.vdi — 8.2 MB
+    [OK]    dist/portix.vmdk — 8.1 MB
+    ```
+
+    All generated files are located in:
+    - `build/` - Intermediate build artifacts
+    - `build/dist/` - Final distribution images
+  </Step>
+</Steps>
+
+## Running Portix OS
+
+### Quick Start with QEMU
+
+If you ran `python scripts/build.py` without the `--no-run` flag, QEMU will launch automatically after building. Otherwise, you can run Portix manually:
+
+<Tabs>
+  <Tab title="Raw Disk Mode">
+    Boot from the raw disk image (default mode):
+
+    ```bash
+    python scripts/build.py --mode=raw
+    ```
+
+    This boots Portix as an IDE hard disk in QEMU.
+  </Tab>
+
+  <Tab title="ISO CD-ROM Mode">
+    Boot from the ISO image:
+
+    ```bash
+    python scripts/build.py --mode=iso
+    ```
+
+    <Note>
+      If you have `xorriso`, `genisoimage`, or `pycdlib` installed, the ISO will be a proper CD-ROM image with El Torito booting. Otherwise, it will boot as a raw disk.
+    </Note>
+  </Tab>
+
+  <Tab title="VMDK Mode">
+    Generate and boot from VMDK format:
+
+    ```bash
+    python scripts/build.py --mode=vmdk
+    ```
+  </Tab>
+
+  <Tab title="Ventoy Simulation Mode">
+    Test Portix in a Ventoy-like environment with offset boot:
+
+    ```bash
+    python scripts/build.py --mode=ventoy-sim
+    ```
+  </Tab>
+</Tabs>
+
+### Build Script Options
+
+The `build.py` script supports several command-line options:
+
+| Option | Description |
+|--------|-------------|
+| `--mode=<mode>` | Specify boot mode: `raw`, `iso`, `vmdk`, `vmi`, `ventoy-sim` |
+| `--no-run` | Build without launching QEMU |
+| `--no-iso` | Skip ISO generation |
+| `--no-vm` | Skip VDI/VMDK generation |
+| `--clean` | Clean all build artifacts |
+
+<CodeGroup>
+  ```bash Build without running
+  python scripts/build.py --no-run
+  ```
+
+  ```bash Build raw image only
+  python scripts/build.py --no-iso --no-vm --no-run
+  ```
+
+  ```bash Clean build
+  python scripts/build.py --clean
+  python scripts/build.py
+  ```
+</CodeGroup>
+
+## What to Expect When It Boots
+
+When Portix successfully boots, you'll see:
+
+<Steps>
+  <Step title="Boot Sequence">
+    The boot process transitions through:
+    1. **Stage 1** loads Stage 2 from disk
+    2. **Stage 2** sets up Long Mode and loads the kernel
+    3. **Kernel** initializes hardware and enters the main loop
+  </Step>
+
+  <Step title="System Tab (F1)">
+    The default view shows:
+    - CPU information (brand, cores, features)
+    - Memory information
+    - Boot status with green checkmarks:
+      ```
+      ✓  OK   Modo largo (64-bit) activo
+      ✓  OK   GDT + TSS cargados
+      ✓  OK   IDT configurada (0-19 + IRQ)
+      ✓  OK   PIC remapeado, IRQ0 habilitado
+      ✓  OK   PIT @ 100 Hz
+      ✓  OK   Teclado PS/2 inicializado
+      ✓  OK   Ratón PS/2 inicializado
+      ✓  OK   Escaneo de discos ATA completo
+      ✓  OK   Framebuffer VESA activo
+      ```
+  </Step>
+
+  <Step title="Terminal Tab (F2)">
+    An interactive terminal with commands:
+    - `ayuda` - Show available commands
+    - `system` - Display system information
+    - `cpu` - Show CPU details
+    - `disk` - List disk partitions
+    - `pci` - Show PCI devices
+    - `clear` - Clear terminal
+    - `edit <filename>` - Open text editor
+
+    ```bash
+    PORTIX v0.7.4  Kernel Bare-Metal
+    Escribe 'ayuda' para comandos.
+
+    >
+    ```
+  </Step>
+
+  <Step title="Interactive UI">
+    Portix includes:
+    - **Mouse support**: PS/2 mouse with cursor rendering
+    - **Keyboard input**: Full keyboard support with modifiers
+    - **Tab navigation**: F1-F5 or click tabs to switch views
+    - **File Explorer (F5)**: Browse FAT32 file system
+    - **IDE (F4)**: Built-in code editor with syntax highlighting
+  </Step>
+</Steps>
+
+## Navigation
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| **F1** | System information |
+| **F2** | Terminal |
+| **F3** | Devices (PCI, ACPI) |
+| **F4** | IDE (code editor) |
+| **F5** | File Explorer |
+| **Tab** | Cycle through tabs |
+| **Esc** | Close menus / Clear terminal |
+| **PgUp/PgDn** | Scroll terminal history |
+| **Home/End** | Jump to top/bottom of terminal |
+
+### Mouse Controls
+
+- **Left Click**: Select, interact with UI elements
+- **Right Click**: Context menus (in Explorer)
+- **Scroll Wheel**: Scroll terminal history
+- **Drag**: Move scrollbars
+
+## Running in VirtualBox
+
+To run Portix in VirtualBox:
+
+<Steps>
+  <Step title="Create a New VM">
+    1. Open VirtualBox
+    2. Click "New" to create a virtual machine
+    3. Name: "Portix OS"
+    4. Type: Other
+    5. Version: Other/Unknown (64-bit)
+  </Step>
+
+  <Step title="Configure VM Settings">
+    - Memory: At least 256 MB
+    - Hard disk: Use existing - select `build/dist/portix.vdi`
+    - System → Motherboard → Enable "IO APIC"
+    - System → Processor → 1 CPU (more if available)
+    - Display → Video Memory → 16 MB minimum
+  </Step>
+
+  <Step title="Boot the VM">
+    Start the VM. It should boot directly into Portix OS.
+
+    <Note>
+      If using the ISO file with `xorriso`/`pycdlib`, add it as a CD-ROM drive in Storage settings.
+    </Note>
+  </Step>
+</Steps>
+
+## Running on Real Hardware
+
+<Warning>
+  Running Portix on real hardware is experimental and may not work on all systems. Always test in a VM first.
+</Warning>
+
+To run Portix on real hardware:
+
+<Steps>
+  <Step title="Prepare USB Drive">
+    Write the raw image to a USB drive:
+
+    <CodeGroup>
+      ```bash Linux
+      sudo dd if=build/dist/portix.img of=/dev/sdX bs=4M status=progress
+      sudo sync
+      ```
+
+      ```bash macOS
+      sudo dd if=build/dist/portix.img of=/dev/diskX bs=4m
+      sudo sync
+      ```
+
+      ```bash Windows
+      # Use Rufus or Win32DiskImager
+      # Select portix.img and write to USB
+      ```
+    </CodeGroup>
+
+    <Warning>
+      Replace `/dev/sdX` or `/dev/diskX` with your actual USB device. **This will erase all data on the drive!**
+    </Warning>
+  </Step>
+
+  <Step title="Configure BIOS">
+    1. Boot into your system's BIOS/UEFI settings (usually F2, Del, or F12)
+    2. **Disable Secure Boot** (Portix uses BIOS Legacy mode)
+    3. Set boot order to boot from USB first
+    4. Save and exit
+  </Step>
+
+  <Step title="Boot from USB">
+    Insert the USB drive and restart your computer. If configured correctly, Portix should boot.
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### Build Errors
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+  <Accordion title="Error: nasm not found">
+    Install NASM using your package manager (see Prerequisites section).
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+
+  <Accordion title="Error: objcopy not found">
+    Install binutils or mingw-w64 packages:
+
+    ```bash
+    # Ubuntu/Debian
+    sudo apt-get install mingw-w64-x86-64-binutils
+
+    # Arch Linux
+    sudo pacman -S binutils
+    ```
+  </Accordion>
+
+  <Accordion title="Error: rust-src component missing">
+    ```bash
+    rustup component add rust-src --toolchain nightly
+    ```
+  </Accordion>
+
+  <Accordion title="Kernel panic or boot failure">
+    Check the serial log for detailed error messages:
+
+    ```bash
+    cat build/logs/serial.log
+    ```
+
+    Debug logs are also available:
+    ```bash
+    cat build/logs/debug.log
+    ```
   </Accordion>
 </AccordionGroup>
 
-### Step 2: Deploy your changes
+### Runtime Issues
 
 <AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+  <Accordion title="Black screen in QEMU">
+    This may indicate a boot failure. Check:
+    1. QEMU is using the correct boot mode
+    2. The disk image was built successfully
+    3. Review `build/logs/serial.log` for errors
+  </Accordion>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Accordion title="Keyboard not responding">
+    PS/2 keyboard initialization may have failed. This is common in some VM configurations. Try:
+    - Restarting the VM
+    - Checking QEMU version (older versions may have PS/2 issues)
+  </Accordion>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
+  <Accordion title="No graphics / VGA text mode">
+    Portix requires VESA framebuffer support. Ensure:
+    - QEMU is using `-vga std` (default in build script)
+    - VirtualBox has sufficient video memory allocated
   </Accordion>
 </AccordionGroup>
 
-### Step 3: Go live
+## Next Steps
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
+Now that you have Portix running:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Explore the Terminal" icon="terminal">
+    Try commands like `system`, `cpu`, `disk`, and `pci` to explore your system
+  </Card>
+  <Card title="Write Some Code" icon="code">
+    Press F4 to open the IDE and create text files
+  </Card>
+  <Card title="Browse Files" icon="folder-open">
+    Press F5 to explore the FAT32 file system
+  </Card>
+  <Card title="Contribute" icon="code-pull-request" href="/development/contributing">
+    Learn how to contribute to Portix OS development
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Additional Resources
+
+- **Build Logs**: Check `build/logs/build.log` for detailed build information
+- **Serial Output**: Debug kernel messages in `build/logs/serial.log`
+- **QEMU Debug**: Hardware-level debug info in `build/logs/debug.log`
+
+<Info>
+  Having issues? Check the serial log first - it contains detailed kernel-level debug output that can help diagnose problems.
+</Info>
+
+---
+
+Congratulations! You've successfully built and run Portix OS. Explore the system, try different commands, and see what this bare-metal kernel can do.

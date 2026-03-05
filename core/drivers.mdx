@@ -1,0 +1,315 @@
+---
+title: "Driver Architecture"
+description: "Comprehensive driver subsystem for Portix OS including ATA, PS/2, PCI, and serial interfaces"
+---
+
+## Overview
+
+Portix OS implements a bare-metal driver architecture supporting storage, input, and bus enumeration without relying on external frameworks. All drivers operate in kernel space with direct hardware access via x86 port I/O instructions.
+
+## ATA/IDE Driver
+
+The ATA driver (`~/workspace/source/kernel/src/drivers/storage/ata.rs`) implements Programmed I/O (PIO) mode for hard disk access with support for both LBA28 and LBA48 addressing.
+
+### Key Features
+
+- **Dual-channel support**: Primary (0x1F0) and Secondary (0x170) buses
+- **LBA28**: Up to 128 GiB per drive (sector < 0x0FFF_FFFF)
+- **LBA48**: Up to 128 PiB per drive (full 48-bit LBA)
+- **Automatic detection**: IDENTIFY command with ATAPI fallback
+- **Caching layer**: Static drive info cache eliminates redundant bus resets
+
+### Architecture
+
+<CodeGroup>
+```rust Drive Detection
+pub struct AtaBus {
+    drives: [Option<DriveInfo>; 4],
+    count:  usize,
+}
+
+impl AtaBus {
+    /// Scans all ATA channels and detects drives.
+    /// Should be called ONCE during boot.
+    pub fn scan() -> Self {
+        // Enumerates Primary0, Primary1, Secondary0, Secondary1
+    }
+}
+```
+
+```rust Drive Operations
+pub struct AtaDrive {
+    info:     DriveInfo,
+    chan:     &'static Channel,
+    is_slave: bool,
+}
+
+impl AtaDrive {
+    pub fn read_sectors(&self, lba: u64, count: usize, buf: &mut [u8]) -> AtaResult<()>
+    pub fn write_sectors(&self, lba: u64, count: usize, buf: &[u8]) -> AtaResult<()>
+    pub fn flush(&self) -> AtaResult<()>
+}
+```
+</CodeGroup>
+
+### Drive Info Caching (v0.8.0)
+
+To prevent multiple hardware resets that can cause drive disappearance in QEMU/VirtualBox:
+
+```rust Cache API
+// Boot-time: store detected drive
+let ata = AtaBus::scan();
+if let Some(info) = ata.info(DriveId::Primary0) {
+    store_primary_drive_info(*info);
+}
+
+// Runtime: retrieve cached info without hardware access
+let info = get_cached_drive_info().expect("Drive not cached");
+let drive = AtaDrive::from_info(info);
+```
+
+<Note>
+**Important**: `AtaBus::scan()` performs a soft-reset of the ATA bus. Calling it multiple times can cause the controller to become unresponsive on some virtual machines. Use the caching API for repeated access.
+</Note>
+
+### Error Handling
+
+```rust Error Types
+pub enum AtaError {
+    NoDrive,              // No device present
+    DeviceError(u8),      // Hardware error code
+    DriveFault,           // Drive fault flag set
+    Timeout,              // Operation timed out (100k iterations)
+    OutOfRange,           // LBA exceeds drive capacity
+    BadBuffer,            // Buffer size not multiple of 512
+}
+```
+
+**Source**: `~/workspace/source/kernel/src/drivers/storage/ata.rs:166`
+
+## PS/2 Input Drivers
+
+### Keyboard Driver
+
+Location: `~/workspace/source/kernel/src/drivers/input/keyboard.rs`
+
+<CodeGroup>
+```rust Keyboard State
+pub struct KeyboardState {
+    shift_l:  bool,
+    shift_r:  bool,
+    caps:     bool,
+    ctrl:     bool,
+    alt:      bool,
+    e0_seen:  bool,
+}
+
+impl KeyboardState {
+    /// Process a scancode byte from the PS/2 buffer
+    pub fn feed_byte(&mut self, sc: u8) -> Option<Key> {
+        self.decode(sc)
+    }
+}
+```
+
+```rust Key Enum
+pub enum Key {
+    Char(u8),
+    Enter, Backspace, Tab, Escape,
+    Up, Down, Left, Right,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10,
+    Delete, Home, End, PageUp, PageDown, Insert,
+}
+```
+</CodeGroup>
+
+**Features**:
+- Extended scancode support (0xE0 prefix for arrow keys)
+- Caps lock state tracking
+- Shift + key translation for uppercase/symbols
+- Unified buffer draining (avoids conflicts with mouse)
+
+### Mouse Driver
+
+Location: `~/workspace/source/kernel/src/drivers/input/mouse.rs`
+
+<CodeGroup>
+```rust Mouse State
+pub struct MouseState {
+    pub x: i32,
+    pub y: i32,
+    pub buttons: u8,
+    pub prev_buttons: u8,
+    pub max_x: i32,
+    pub max_y: i32,
+    pub present: bool,
+}
+
+impl MouseState {
+    /// Initialize PS/2 mouse with auxiliary channel
+    pub fn init(&mut self, sw: usize, sh: usize) -> bool
+    
+    /// Process a mouse data byte
+    pub fn feed(&mut self, byte: u8) -> bool
+    
+    /// Check button state
+    pub fn left_clicked(&self) -> bool
+}
+```
+</CodeGroup>
+
+**Features**:
+- PS/2 auxiliary channel initialization
+- 3-byte packet protocol (flags + dx + dy)
+- 9-bit signed delta reconstruction
+- Teleport detection (threshold: 120 pixels)
+- Automatic controller reset on error accumulation
+- Sensitivity scaling (2x multiplier)
+
+**Source**: `~/workspace/source/kernel/src/drivers/input/mouse.rs:192`
+
+<Warning>
+The mouse driver requires the PS/2 controller to be properly initialized with cascaded IRQ 12 enabled. The 9-bit delta reconstruction (lines 205-215) is critical for preventing cursor teleportation on large movements.
+</Warning>
+
+## PCI Bus Enumeration
+
+Location: `~/workspace/source/kernel/src/drivers/bus/pci.rs`
+
+```rust PCI Scanning
+pub struct PciBus {
+    pub devices: [PciDevice; 64],
+    pub count:   usize,
+}
+
+impl PciBus {
+    /// Scan all PCI buses (0-255), devices (0-31), functions (0-7)
+    pub fn scan() -> Self {
+        // Uses I/O ports 0xCF8 (address) and 0xCFC (data)
+    }
+}
+```
+
+### Device Structure
+
+```rust PCI Device
+pub struct PciDevice {
+    pub bus:        u8,
+    pub device:     u8,
+    pub function:   u8,
+    pub vendor_id:  u16,
+    pub device_id:  u16,
+    pub class_code: u8,
+    pub subclass:   u8,
+    pub prog_if:    u8,
+    pub header_type: u8,
+    pub irq_line:   u8,
+}
+
+impl PciDevice {
+    pub fn class_name(&self) -> &'static str
+    pub fn vendor_name(&self) -> &'static str
+}
+```
+
+**Known Vendors**: Intel, AMD, NVIDIA, AMD/ATI, Broadcom, VirtIO, QEMU/Bochs, VMware, VirtualBox
+
+**Source**: `~/workspace/source/kernel/src/drivers/bus/pci.rs:70`
+
+## Serial Port Driver
+
+Location: `~/workspace/source/kernel/src/drivers/serial.rs`
+
+### Configuration
+
+- **Port**: COM1 (0x3F8)
+- **Baud rate**: 38400
+- **Format**: 8N1 (8 data bits, no parity, 1 stop bit)
+- **FIFO**: Enabled with 14-byte threshold
+
+### Initialization with Self-Test
+
+```rust Serial Init
+pub fn init() {
+    // Configure UART registers
+    // Enable loopback mode
+    outb(COM1 + 4, 0x1E);
+    
+    // Self-test: send 0xAE
+    outb(COM1 + 0, 0xAE);
+    let loopback = inb(COM1 + 0);
+    
+    if loopback != 0xAE {
+        SERIAL_OK.store(false);
+        return; // Silent failure
+    }
+    
+    // Switch to normal mode
+    outb(COM1 + 4, 0x0B);
+}
+```
+
+**Source**: `~/workspace/source/kernel/src/drivers/serial.rs:38`
+
+### Log Levels
+
+```rust Logging API
+pub enum Level {
+    Debug,  // [ DBG ]
+    Info,   // [ INF ]
+    Ok,     // [  OK ]
+    Warn,   // [ WRN ]
+    Error,  // [ ERR ]
+}
+
+pub fn log_level(level: Level, subsystem: &str, message: &str)
+```
+
+## ACPI Power Management
+
+Location: `~/workspace/source/kernel/src/drivers/bus/acpi.rs`
+
+Provides system power control via ACPI S5 state and keyboard controller reset.
+
+```rust Power Control
+pub fn poweroff() {
+    // ACPI S5 via port 0x604 (QEMU)
+}
+
+pub fn reboot() {
+    // Keyboard controller pulse reset line
+    outb(0x64, 0xFE);
+}
+```
+
+## Driver Initialization Order
+
+1. **Serial** - COM1 for early boot logging
+2. **PCI** - Enumerate devices and bridges
+3. **ATA** - Detect storage devices (once, with caching)
+4. **PS/2** - Initialize keyboard and mouse controllers
+5. **ACPI** - Parse tables for power management
+
+```rust Boot Sequence
+serial::init();
+let pci = PciBus::scan();
+let ata = AtaBus::scan();
+if let Some(info) = ata.info(DriveId::Primary0) {
+    store_primary_drive_info(*info);
+}
+mouse.init(screen_width, screen_height);
+```
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Filesystem" icon="hard-drive" href="/core/filesystem">
+    FAT32 and VFS implementation
+  </Card>
+  <Card title="Graphics" icon="display" href="/core/graphics">
+    Framebuffer and rendering
+  </Card>
+  <Card title="Console" icon="terminal" href="/core/console">
+    Terminal interface
+  </Card>
+</CardGroup>

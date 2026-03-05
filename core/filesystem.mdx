@@ -1,0 +1,400 @@
+---
+title: "Filesystem"
+description: "FAT32 implementation with VFS abstraction layer for Portix OS"
+---
+
+## Overview
+
+Portix OS implements a two-layer filesystem architecture: a **VFS (Virtual Filesystem)** abstraction for path resolution and a **FAT32 driver** for actual disk I/O. The system supports full read/write operations, long filename (LFN) entries, and mkfs formatting.
+
+## Virtual Filesystem (VFS)
+
+Location: `~/workspace/source/kernel/src/drivers/storage/vfs.rs`
+
+The VFS provides a Unix-like directory structure over FAT32 clusters.
+
+### Directory Tree
+
+```
+/             Root (FAT32 root cluster)
+├── bin/      System executables
+├── etc/      Configuration files
+├── home/
+│   └── user/ User files
+├── tmp/      Temporary storage
+├── usr/      User utilities
+└── var/      Logs and runtime data
+```
+
+### Path Resolution
+
+<CodeGroup>
+```rust VFS Mounting
+pub struct VfsMount {
+    keys:     [[u8; 64]; 16],
+    key_lens: [usize;    16],
+    clusters: [u32;      16],
+    count:    usize,
+}
+
+impl VfsMount {
+    /// Map a path to a FAT32 cluster
+    pub fn register(&mut self, path: &str, cluster: u32)
+    
+    /// Retrieve the cluster for a path
+    pub fn resolve(&self, path: &str) -> Option<u32>
+}
+```
+
+```rust Path Manipulation
+/// Split "/home/user/file.txt" into ["home", "user", "file.txt"]
+pub fn path_split(
+    path: &str,
+    bufs: &mut [[u8; 64]],
+    lens: &mut [usize]
+) -> usize
+
+/// Join "home" + "file.txt" -> "home/file.txt"
+pub fn path_join(
+    dir: &str,
+    name: &str,
+    out: &mut [u8]
+) -> usize
+
+/// Extract basename: "/home/user/foo.txt" -> "foo.txt"
+pub fn basename(path: &str) -> &str
+```
+</CodeGroup>
+
+**Source**: `~/workspace/source/kernel/src/drivers/storage/vfs.rs:66`
+
+<Note>
+VFS functions avoid lifetime issues by copying path components into caller-owned buffers rather than returning string slices. This is a bare-metal kernel design pattern.
+</Note>
+
+## FAT32 Driver
+
+Location: `~/workspace/source/kernel/src/drivers/storage/fat32.rs`
+
+### Volume Mounting
+
+```rust Volume Structure
+pub struct Fat32Volume {
+    drive:         AtaDrive,
+    part_lba:      u64,
+    bytes_per_sec: u16,
+    sec_per_clus:  u32,
+    reserved_secs: u32,
+    num_fats:      u32,
+    fat_size:      u32,
+    root_clus:     u32,
+    data_start:    u64,
+    clus_count:    u32,
+}
+
+impl Fat32Volume {
+    /// Mount a FAT32 partition from an ATA drive
+    pub fn mount(drive: AtaDrive) -> FatResult<Self> {
+        // 1. Read MBR at LBA 0
+        // 2. Find FAT32 partition (type 0x0B/0x0C/0x0E)
+        // 3. Read VBR and parse BPB
+        // 4. Validate "FAT32   " signature
+    }
+}
+```
+
+**Source**: `~/workspace/source/kernel/src/drivers/storage/fat32.rs:163`
+
+### FAT Operations
+
+<CodeGroup>
+```rust Cluster I/O
+impl Fat32Volume {
+    /// Read FAT entry for a cluster
+    fn read_fat(&self, cluster: u32) -> FatResult<u32>
+    
+    /// Write FAT entry (updates all FAT copies)
+    fn write_fat(&self, cluster: u32, value: u32) -> FatResult<()>
+    
+    /// Allocate a free cluster from FAT
+    fn alloc_cluster(&self) -> FatResult<u32>
+    
+    /// Free a cluster chain
+    fn free_chain(&self, start: u32) -> FatResult<()>
+}
+```
+
+```rust Data I/O
+impl Fat32Volume {
+    /// Read entire cluster into buffer
+    fn read_cluster(&self, cluster: u32, buf: &mut ClusterBuf) -> FatResult<()>
+    
+    /// Write cluster from buffer
+    fn write_cluster(&self, cluster: u32, buf: &ClusterBuf) -> FatResult<()>
+}
+```
+</CodeGroup>
+
+**Constants**:
+- `FAT_EOC = 0x0FFF_FFF8` (End of chain marker)
+- `FAT_FREE = 0x0000_0000` (Free cluster)
+- `DIR_ENTRY_SIZE = 32` bytes
+
+### Directory Operations
+
+```rust Directory Listing
+pub struct DirEntryInfo {
+    pub name:       [u8; 256],
+    pub name_len:   usize,
+    pub is_dir:     bool,
+    pub size:       u32,
+    pub cluster:    u32,
+    pub dir_sector: u64,
+    pub dir_offset: usize,
+}
+
+impl Fat32Volume {
+    /// List all entries in a directory
+    pub fn list_dir<F>(&self, dir_cluster: u32, mut cb: F) -> FatResult<()>
+    where F: FnMut(&DirEntryInfo)
+    
+    /// Find specific entry by name (case-insensitive)
+    pub fn find_entry(&self, dir_cluster: u32, name: &str) -> FatResult<DirEntryInfo>
+}
+```
+
+**Example**:
+
+```rust Listing Files
+let root = volume.root_cluster();
+volume.list_dir(root, |entry| {
+    println!("{} - {} bytes", entry.name_str(), entry.size);
+})?;
+```
+
+### File Operations
+
+<CodeGroup>
+```rust Reading Files
+impl Fat32Volume {
+    /// Read file contents into buffer
+    pub fn read_file(
+        &self,
+        entry: &DirEntryInfo,
+        buf: &mut [u8]
+    ) -> FatResult<usize> {
+        if entry.is_dir { return Err(FatError::IsDir); }
+        
+        let to_read = buf.len().min(entry.size as usize);
+        let mut clus = entry.cluster;
+        let mut done = 0;
+        
+        while done < to_read && !self.is_eoc(clus) {
+            // Read cluster, advance through FAT chain
+        }
+        
+        Ok(done)
+    }
+}
+```
+
+```rust Writing Files
+impl Fat32Volume {
+    /// Overwrite file with new data
+    pub fn write_file(
+        &self,
+        entry: &mut DirEntryInfo,
+        data: &[u8]
+    ) -> FatResult<()> {
+        // 1. Free existing cluster chain
+        // 2. Allocate new clusters as needed
+        // 3. Write data to cluster chain
+        // 4. Update directory entry size
+    }
+}
+```
+</CodeGroup>
+
+**Source**: `~/workspace/source/kernel/src/drivers/storage/fat32.rs:335`
+
+### Creating Entries
+
+```rust File Creation
+impl Fat32Volume {
+    /// Create a new file (allocates directory entry)
+    pub fn create_file(
+        &self,
+        dir_cluster: u32,
+        name: &str
+    ) -> FatResult<DirEntryInfo>
+    
+    /// Create a new directory (allocates cluster)
+    pub fn create_dir(
+        &self,
+        dir_cluster: u32,
+        name: &str
+    ) -> FatResult<DirEntryInfo>
+    
+    /// Delete entry and free cluster chain
+    pub fn delete_entry(
+        &self,
+        entry: &DirEntryInfo
+    ) -> FatResult<()>
+}
+```
+
+### Long Filename Support
+
+The driver fully supports **LFN (Long File Name)** entries, which are stored as special directory entries preceding the 8.3 entry.
+
+```rust LFN Structure
+#[repr(C, packed)]
+struct LfnEntry {
+    order:    u8,         // Sequence number (0x40 = last)
+    name1:    [u16; 5],   // Characters 1-5 (UTF-16)
+    attr:     u8,         // Always 0x0F for LFN
+    _type:    u8,
+    checksum: u8,         // 8.3 name checksum
+    name2:    [u16; 6],   // Characters 6-11
+    _clus:    u16,        // Always 0
+    name3:    [u16; 2],   // Characters 12-13
+}
+```
+
+**LFN Accumulation** (fixed in v0.7.5):
+
+```rust LFN Parsing
+fn accumulate_lfn(lfn: &LfnEntry, buf: &mut [u16; 256], len: &mut usize) {
+    let order = (lfn.order & 0x1F) as usize;
+    let base = (order - 1) * 13;
+    
+    // Read 13 UTF-16 characters using unaligned reads
+    // (LfnEntry is packed, fields are unaligned)
+}
+```
+
+**Source**: `~/workspace/source/kernel/src/drivers/storage/fat32.rs:484`
+
+<Warning>
+**v0.7.5 Bug Fix**: Previous versions had duplicate LFN character insertion causing name corruption. The current version uses a single code path with proper `read_unaligned()` for packed struct fields.
+</Warning>
+
+## Error Handling
+
+```rust Error Types
+pub enum FatError {
+    Ata(AtaError),    // Underlying ATA error
+    NotFat32,         // Invalid filesystem signature
+    NotFound,         // File/directory not found
+    NoSpace,          // No free clusters
+    IsDir,            // Operation invalid on directory
+    IsFile,           // Operation invalid on file
+    NameTooLong,      // Name exceeds 255 characters
+    InvalidPath,      // Malformed path
+    Corrupt,          // Filesystem corruption detected
+}
+```
+
+## mkfs Utility
+
+Location: `~/workspace/source/kernel/src/drivers/storage/mkfs.rs`
+
+Provides in-kernel FAT32 formatting.
+
+```rust Format API
+pub fn format_fat32(
+    drive: &AtaDrive,
+    part_lba: u64,
+    size_sectors: u64,
+    volume_label: &str
+) -> Result<(), FormatError> {
+    // 1. Calculate cluster size (8 sectors = 4 KiB default)
+    // 2. Write BPB structure
+    // 3. Clear FAT tables
+    // 4. Mark root directory cluster as allocated
+    // 5. Initialize empty root directory
+}
+```
+
+## Usage Example
+
+<CodeGroup>
+```rust Complete Workflow
+use crate::drivers::storage::{ata, fat32, vfs};
+
+// 1. Get cached drive info
+let info = ata::get_cached_drive_info().expect("No drive");
+let drive = ata::AtaDrive::from_info(info);
+
+// 2. Mount FAT32 volume
+let volume = fat32::Fat32Volume::mount(drive)?;
+
+// 3. Set up VFS
+let mut vfs = vfs::VfsMount::new();
+vfs.register("/", volume.root_cluster());
+
+// 4. Create a file
+let root = volume.root_cluster();
+let mut file = volume.create_file(root, "test.txt")?;
+
+// 5. Write data
+let data = b"Hello from Portix!";
+volume.write_file(&mut file, data)?;
+
+// 6. Read back
+let mut buf = [0u8; 64];
+let read = volume.read_file(&file, &mut buf)?;
+assert_eq!(&buf[..read], data);
+```
+
+```rust Directory Traversal
+// Recursively list directory tree
+fn list_recursive(
+    vol: &Fat32Volume,
+    cluster: u32,
+    depth: usize
+) -> FatResult<()> {
+    vol.list_dir(cluster, |entry| {
+        let indent = "  ".repeat(depth);
+        println!("{}{}", indent, entry.name_str());
+        
+        if entry.is_dir && entry.cluster >= 2 {
+            list_recursive(vol, entry.cluster, depth + 1);
+        }
+    })
+}
+```
+</CodeGroup>
+
+## Performance Characteristics
+
+| Operation | Complexity | Notes |
+|-----------|-----------|-------|
+| Mount | O(1) | Reads MBR + VBR only |
+| List directory | O(n) | n = entries in directory |
+| Find entry | O(n) | Linear scan, case-insensitive |
+| Read file | O(c) | c = cluster count (size / 4 KiB) |
+| Write file | O(c) | Frees old + allocates new clusters |
+| Allocate cluster | O(m) | m = total clusters (linear scan) |
+
+<Note>
+**Cluster size**: Default 8 sectors × 512 bytes = 4 KiB. A 100 KiB file requires ~25 cluster allocations.
+</Note>
+
+## Limitations
+
+- **No cluster bitmap**: Allocation scans FAT linearly (can be slow on large volumes)
+- **Single FAT cache**: No in-memory FAT caching beyond per-operation reads
+- **No fragmentation handling**: Files written sequentially may not be contiguous
+- **No journal**: Crash during write can corrupt filesystem
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Drivers" icon="microchip" href="/core/drivers">
+    ATA storage driver
+  </Card>
+  <Card title="Console" icon="terminal" href="/core/console">
+    File management commands
+  </Card>
+</CardGroup>

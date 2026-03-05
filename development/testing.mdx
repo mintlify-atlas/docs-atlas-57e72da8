@@ -1,0 +1,363 @@
+---
+title: "Testing Portix OS"
+description: "Guide to testing and debugging Portix OS in emulators and on real hardware"
+icon: "vial"
+---
+
+## Testing in QEMU
+
+QEMU is the recommended emulator for testing Portix OS during development due to its speed and debugging capabilities.
+
+### Quick Start
+
+Build and run in one command:
+
+```bash
+python scripts/build.py --mode=raw --run
+```
+
+This will:
+1. Build the kernel and disk image
+2. Launch QEMU with appropriate flags
+3. Show serial output in the console
+
+### Manual QEMU Launch
+
+For more control, build first and run manually:
+
+<Tabs>
+  <Tab title="Raw Disk Image">
+    ```bash
+    qemu-system-x86_64 \
+      -drive format=raw,file=build/portix.img \
+      -m 128M \
+      -serial stdio \
+      -no-reboot \
+      -no-shutdown
+    ```
+  </Tab>
+
+  <Tab title="ISO Image">
+    ```bash
+    qemu-system-x86_64 \
+      -cdrom build/dist/portix.iso \
+      -boot d \
+      -m 128M \
+      -serial stdio \
+      -no-reboot \
+      -no-shutdown
+    ```
+  </Tab>
+
+  <Tab title="With Debugging">
+    ```bash
+    qemu-system-x86_64 \
+      -drive format=raw,file=build/portix.img \
+      -m 128M \
+      -serial stdio \
+      -no-reboot \
+      -no-shutdown \
+      -d int,cpu_reset \
+      -D build/logs/qemu.log
+    ```
+  </Tab>
+</Tabs>
+
+### QEMU Flags Explained
+
+| Flag | Purpose |
+|------|--------|
+| `-m 128M` | Allocate 128 MB of RAM |
+| `-serial stdio` | Route COM1 to console |
+| `-no-reboot` | Halt on kernel panic instead of rebooting |
+| `-no-shutdown` | Keep QEMU open after shutdown |
+| `-d int,cpu_reset` | Log interrupts and CPU resets |
+| `-D logfile` | Write debug log to file |
+| `-s` | Start GDB server on port 1234 |
+| `-S` | Pause on startup (wait for GDB) |
+
+<Note>
+The `-serial stdio` flag is important for seeing kernel debug output.
+Portix writes diagnostic messages to COM1 (0x3F8).
+</Note>
+
+## Testing in VirtualBox
+
+VirtualBox provides a more realistic test environment closer to real hardware.
+
+### Creating a VM
+
+<Steps>
+  <Step title="Build VDI image">
+    ```bash
+    python scripts/build.py --mode=vdi
+    ```
+  </Step>
+
+  <Step title="Create new VM">
+    Open VirtualBox and create a new VM:
+    - Name: Portix OS
+    - Type: Other
+    - Version: Other/Unknown (64-bit)
+    - Memory: 128 MB
+    - Hard disk: Use existing (select `build/dist/portix.vdi`)
+  </Step>
+
+  <Step title="Configure VM">
+    Under Settings:
+    - **System → Motherboard**: Disable EFI, enable I/O APIC
+    - **System → Processor**: 1 CPU
+    - **Display → Screen**: 8 MB video memory
+    - **Storage**: Ensure disk is on IDE controller
+  </Step>
+
+  <Step title="Boot the VM">
+    Click Start. You should see:
+    1. BIOS screen
+    2. Bootloader loading stage 2
+    3. Transition to Long Mode
+    4. Portix UI with tabs
+  </Step>
+</Steps>
+
+### Testing with ISO
+
+Alternatively, use the ISO image:
+
+```bash
+python scripts/build.py --mode=iso
+```
+
+Then attach `build/dist/portix.iso` as a CD-ROM in VirtualBox settings.
+
+<Warning>
+Make sure "Enable EFI" is **disabled** in System → Motherboard.
+Portix uses BIOS boot, not UEFI.
+</Warning>
+
+## Debugging with GDB
+
+QEMU supports remote debugging via GDB.
+
+### Setup
+
+<Steps>
+  <Step title="Start QEMU with GDB server">
+    ```bash
+    qemu-system-x86_64 \
+      -drive format=raw,file=build/portix.img \
+      -m 128M \
+      -s -S
+    ```
+    
+    This starts QEMU paused, waiting for GDB on port 1234.
+  </Step>
+
+  <Step title="Connect GDB">
+    In another terminal:
+    ```bash
+    gdb target/x86_64-portix/release/kernel
+    (gdb) target remote localhost:1234
+    (gdb) break rust_main
+    (gdb) continue
+    ```
+  </Step>
+
+  <Step title="Debug the kernel">
+    Use GDB commands:
+    - `break function_name` - Set breakpoint
+    - `continue` - Resume execution
+    - `step` - Step into
+    - `next` - Step over
+    - `info registers` - Show CPU state
+    - `x/10i $rip` - Disassemble at instruction pointer
+  </Step>
+</Steps>
+
+### Useful GDB Commands
+
+```gdb
+# Break at kernel entry
+break _start
+
+# Break at IDT initialization
+break init_idt
+
+# Examine memory
+x/100x 0x100000
+
+# Show backtrace
+backtrace
+
+# Print variable
+print variable_name
+```
+
+<Tip>
+Use `layout asm` in GDB for a split-screen view with assembly and source.
+</Tip>
+
+## Serial Port Debugging
+
+Portix sends diagnostic output to COM1 (serial port 0x3F8).
+
+### Viewing Serial Output
+
+When running with `--run`, serial output appears in the console:
+
+```bash
+python scripts/build.py --mode=raw --run
+```
+
+Output is also saved to `build/logs/serial.log`:
+
+```bash
+tail -f build/logs/serial.log
+```
+
+### Adding Debug Messages
+
+In your Rust code:
+
+```rust
+use crate::drivers::serial;
+
+serial::log("TAG", "Debug message");
+serial::write_str("Direct output\n");
+```
+
+Or use the serial logger levels:
+
+```rust
+serial::log_level(Level::Info, "INFO", "System initialized");
+serial::log_level(Level::Warn, "MEM", "Low memory");
+serial::log_level(Level::Error, "ATA", "Drive not found");
+```
+
+## Testing Different Boot Modes
+
+### ISO (CD-ROM Boot)
+
+Test El Torito bootable CD:
+
+```bash
+python scripts/build.py --mode=iso --run
+```
+
+Expected behavior:
+- QEMU boots from CD-ROM
+- El Torito HD emulation loads bootloader
+- System boots identically to disk image
+
+### Ventoy Simulation
+
+Test Ventoy compatibility:
+
+```bash
+python scripts/build.py --mode=ventoy-sim
+```
+
+This creates a larger disk image with the kernel offset by 2048 sectors, simulating how Ventoy loads ISOs.
+
+## Performance Testing
+
+### Measuring Boot Time
+
+Add timing code to the kernel:
+
+```rust
+let boot_start = time::pit::ticks();
+// ... initialization ...
+let boot_end = time::pit::ticks();
+let boot_ms = (boot_end - boot_start) * 10; // PIT runs at 100 Hz
+serial::log("BOOT", &format!("Completed in {} ms", boot_ms));
+```
+
+### Memory Allocation Performance
+
+Test allocator speed:
+
+```rust
+use crate::mem::allocator::ALLOC_STATS;
+
+let before_allocs = ALLOC_STATS.total_allocs.load(Ordering::Relaxed);
+let start = time::pit::ticks();
+
+// Allocate 1000 blocks
+for _ in 0..1000 {
+    let layout = Layout::from_size_align(4096, 4096).unwrap();
+    let ptr = unsafe { alloc::alloc::alloc(layout) };
+    unsafe { alloc::alloc::dealloc(ptr, layout) };
+}
+
+let end = time::pit::ticks();
+let after_allocs = ALLOC_STATS.total_allocs.load(Ordering::Relaxed);
+let ops_per_sec = (after_allocs - before_allocs) * 100 / (end - start).max(1);
+serial::log("PERF", &format!("{} allocs/sec", ops_per_sec));
+```
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="QEMU shows 'Boot failed'">
+    - Check that boot sector ends with `0x55AA`
+    - Verify stage2 LBA is correct in boot.bin
+    - Try `-boot c` instead of auto-detection
+  </Accordion>
+
+  <Accordion title="Triple fault on boot">
+    - Enable interrupt logging: `-d int -D qemu.log`
+    - Check IDT initialization in `arch/idt.rs`
+    - Verify GDT is set up correctly
+    - Check for stack overflow
+  </Accordion>
+
+  <Accordion title="VirtualBox shows black screen">
+    - Disable EFI in VM settings
+    - Verify video memory is at least 8 MB
+    - Check that framebuffer is initialized
+    - Try with 'VBoxVGA' graphics controller
+  </Accordion>
+
+  <Accordion title="No serial output">
+    - Verify COM1 initialization: `drivers::serial::init()`
+    - Check that `-serial stdio` is passed to QEMU
+    - Look for output in `build/logs/serial.log`
+  </Accordion>
+
+  <Accordion title="Page fault on startup">
+    - Check page tables are identity-mapped
+    - Verify kernel is loaded at correct address
+    - Use GDB to examine CR2 (fault address)
+    ```gdb
+    info registers cr2
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Testing Checklist
+
+Before submitting changes, verify:
+
+- [ ] Kernel builds without warnings
+- [ ] Boots successfully in QEMU
+- [ ] Boots successfully in VirtualBox
+- [ ] Serial output shows no errors
+- [ ] All tabs are accessible (F1-F5)
+- [ ] Keyboard input works
+- [ ] Mouse cursor moves
+- [ ] Terminal accepts commands
+- [ ] File explorer shows FAT32 contents
+- [ ] No memory leaks (check allocator stats)
+- [ ] No triple faults or panics
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Contributing" icon="code-pull-request" href="/development/contributing">
+    Ready to contribute? Read the guidelines
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Understand the system architecture
+  </Card>
+</CardGroup>

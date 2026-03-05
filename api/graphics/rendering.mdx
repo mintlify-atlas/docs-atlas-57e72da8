@@ -1,0 +1,415 @@
+---
+title: Rendering API
+description: Font rendering and alpha blending utilities
+icon: "paintbrush"
+---
+
+## Overview
+
+The rendering module provides font data and advanced color blending operations for the graphics system.
+
+**Location**: `kernel/src/graphics/render/`
+
+## Font System
+
+### FONT_8X8
+
+Bitmap font data for ASCII characters.
+
+```rust
+pub const FONT_8X8: [[u8; 8]; 96]
+```
+
+**Format**: Each character is 8 bytes (8 rows of 8 bits)  
+**Range**: ASCII 32 (space) through 127 (DEL)  
+**Index**: `FONT_8X8[char_code - 32]`
+
+**Location**: `kernel/src/graphics/render/font.rs:6`
+
+### Font Encoding
+
+Each byte represents one horizontal row of pixels. MSB is the leftmost pixel.
+
+**Example - Letter 'A' (ASCII 65):**
+
+```rust
+FONT_8X8[65 - 32] = [
+    0x0C,  // ...##...
+    0x1E,  // ..####..
+    0x33,  // ..##..##
+    0x33,  // ..##..##
+    0x3F,  // ..######
+    0x33,  // ..##..##
+    0x33,  // ..##..##
+    0x00,  // ........
+]
+```
+
+### Usage Example
+
+```rust
+use crate::graphics::render::font::FONT_8X8;
+use crate::graphics::driver::framebuffer::{Color, Console};
+
+fn draw_char(c: &mut Console, x: usize, y: usize, ch: char, fg: Color, bg: Color) {
+    let ascii = ch as usize;
+    if ascii < 32 || ascii > 127 { return; }
+    
+    let glyph = FONT_8X8[ascii - 32];
+    
+    for (row, &byte) in glyph.iter().enumerate() {
+        for col in 0..8 {
+            let pixel_on = (byte & (1 << col)) != 0;
+            let color = if pixel_on { fg } else { bg };
+            // Draw pixel at (x + col, y + row)
+        }
+    }
+}
+```
+
+---
+
+## Alpha Blending
+
+### Alpha LUT
+
+Lookup table for fast alpha multiplication without division.
+
+```rust
+static mut ALPHA_LUT: [[u8; 256]; 256];
+```
+
+### init_alpha_lut
+
+```rust
+pub fn init_alpha_lut()
+```
+
+Initializes the alpha multiplication lookup table. Called automatically during framebuffer initialization.
+
+**Formula**: `ALPHA_LUT[alpha][value] = (value * alpha) / 255`
+
+**Performance**: Eliminates expensive division operations in hot blending loops.
+
+---
+
+### alpha_mul
+
+```rust
+fn alpha_mul(value: u8, alpha: u8) -> u8
+```
+
+Fast alpha multiplication using LUT.
+
+<ParamField path="value" type="u8" required>
+  Color channel value (0-255)
+</ParamField>
+
+<ParamField path="alpha" type="u8" required>
+  Alpha value (0=transparent, 255=opaque)
+</ParamField>
+
+**Returns**: Multiplied value (0-255)
+
+**Example:**
+
+```rust
+let dimmed_red = alpha_mul(255, 128);  // 50% opacity → 127
+```
+
+---
+
+## Color Blending
+
+### blend_fast
+
+```rust
+pub fn blend_fast(self, dst: Color, alpha: u8) -> Color
+```
+
+High-performance alpha blending using LUT.
+
+<ParamField path="self" type="Color" required>
+  Source (foreground) color
+</ParamField>
+
+<ParamField path="dst" type="Color" required>
+  Destination (background) color
+</ParamField>
+
+<ParamField path="alpha" type="u8" required>
+  Blend amount (0=fully dst, 255=fully src)
+</ParamField>
+
+**Formula**:
+```
+out.r = (src.r * alpha + dst.r * (255 - alpha)) / 255
+out.g = (src.g * alpha + dst.g * (255 - alpha)) / 255  
+out.b = (src.b * alpha + dst.b * (255 - alpha)) / 255
+```
+
+**Example:**
+
+```rust
+let fg = Color::PORTIX_GOLD;
+let bg = Color::PORTIX_BG;
+
+// 75% gold, 25% background
+let blended = fg.blend_fast(bg, 192);
+```
+
+---
+
+### fill_rect_alpha_fast
+
+```rust
+pub fn fill_rect_alpha_fast(
+    &mut self,
+    x: usize, y: usize,
+    w: usize, h: usize,
+    color: Color,
+    alpha: u8
+)
+```
+
+Fills a rectangle with alpha-blended color.
+
+<ParamField path="x" type="usize" required>
+  X coordinate
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate
+</ParamField>
+
+<ParamField path="w" type="usize" required>
+  Width in pixels
+</ParamField>
+
+<ParamField path="h" type="usize" required>
+  Height in pixels
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Fill color
+</ParamField>
+
+<ParamField path="alpha" type="u8" required>
+  Transparency (0=invisible, 255=opaque)
+</ParamField>
+
+**Example:**
+
+```rust
+let mut console = Console::new();
+
+// Semi-transparent overlay
+console.fill_rect_alpha_fast(
+    100, 100,      // Position
+    200, 150,      // Size
+    Color::BLACK,  // Color
+    128            // 50% transparent
+);
+```
+
+---
+
+## Gradient Rendering
+
+### fill_gradient_dither
+
+```rust
+pub fn fill_gradient_dither(
+    &mut self,
+    x: usize, y: usize,
+    w: usize, h: usize,
+    c0: Color,
+    c1: Color
+)
+```
+
+Renders a smooth gradient using Bayer dithering to eliminate color banding.
+
+<ParamField path="x" type="usize" required>
+  X coordinate
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate
+</ParamField>
+
+<ParamField path="w" type="usize" required>
+  Width
+</ParamField>
+
+<ParamField path="h" type="usize" required>
+  Height
+</ParamField>
+
+<ParamField path="c0" type="Color" required>
+  Start color (left)
+</ParamField>
+
+<ParamField path="c1" type="Color" required>
+  End color (right)
+</ParamField>
+
+**Algorithm**:
+1. For each pixel, calculate linear interpolation position `t`
+2. Apply Bayer 4x4 dithering threshold
+3. Blend colors using adjusted `t` value
+
+**Example:**
+
+```rust
+console.fill_gradient_dither(
+    0, 50,
+    800, 4,
+    Color::PORTIX_GOLD,  // Left edge
+    Color::PORTIX_BG     // Right edge
+);
+```
+
+---
+
+## Text Rendering
+
+### draw_char_tall
+
+```rust
+pub fn draw_char_tall(
+    &mut self,
+    x: usize, y: usize,
+    ch: char,
+    fg: Color,
+    bg: Color
+)
+```
+
+Draws a character at 2x vertical scale (8x16 pixels).
+
+<ParamField path="x" type="usize" required>
+  X coordinate
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate
+</ParamField>
+
+<ParamField path="ch" type="char" required>
+  Character to render
+</ParamField>
+
+<ParamField path="fg" type="Color" required>
+  Foreground color
+</ParamField>
+
+<ParamField path="bg" type="Color" required>
+  Background color
+</ParamField>
+
+**Example:**
+
+```rust
+// Large header text
+console.draw_char_tall(10, 10, 'P', Color::PORTIX_GOLD, Color::BLACK);
+console.draw_char_tall(19, 10, 'O', Color::PORTIX_GOLD, Color::BLACK);
+```
+
+---
+
+### write_at_tall
+
+```rust
+pub fn write_at_tall(
+    &mut self,
+    text: &str,
+    x: usize, y: usize,
+    color: Color
+)
+```
+
+Writes text at 2x vertical scale.
+
+<ParamField path="text" type="&str" required>
+  Text to render
+</ParamField>
+
+<ParamField path="x" type="usize" required>
+  X coordinate
+</ParamField>
+
+<ParamField path="y" type="usize" required>
+  Y coordinate
+</ParamField>
+
+<ParamField path="color" type="Color" required>
+  Text color
+</ParamField>
+
+**Example:**
+
+```rust
+console.write_at_tall("PORTIX OS", 20, 20, Color::PORTIX_GOLD);
+```
+
+---
+
+## Coordinate System
+
+### Screen Space
+
+All drawing operations use **pixel coordinates** with origin `(0, 0)` at **top-left**.
+
+```
+(0,0) ──────────────────→ X
+  │
+  │     (100, 50)
+  │        ●
+  │
+  │
+  ↓
+  Y
+```
+
+### Clipping
+
+All drawing primitives automatically clip to framebuffer bounds:
+- Negative coordinates are clamped to 0
+- Coordinates beyond width/height are ignored
+- Partial shapes are rendered correctly
+
+**Example:**
+
+```rust
+// This is safe - automatically clipped
+console.fill_rect(
+    -50, 100,     // Partially off-screen
+    200, 100,
+    Color::RED
+);
+```
+
+---
+
+## Performance Considerations
+
+### LUT Initialization
+
+Always called during `Framebuffer::new()` - no manual initialization needed.
+
+### Blending Hotspots
+
+For best performance:
+- Use `fill_rect()` for opaque rectangles
+- Use `fill_rect_alpha_fast()` only when transparency is needed
+- Batch drawing operations before `present()`
+
+### Font Rendering
+
+The 8x8 font is optimal for:
+- Terminal/console output
+- Debug text
+- UI labels
+
+For larger text, use `draw_char_tall()` or scale up in software.

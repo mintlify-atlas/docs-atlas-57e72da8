@@ -1,0 +1,278 @@
+---
+title: "Building Portix OS"
+description: "Complete guide to building Portix OS from source with the build.py script"
+icon: "hammer"
+---
+
+## Overview
+
+Portix OS uses a Python-based build system (`build.py`) that orchestrates the entire compilation pipeline from assembly bootloader to Rust kernel. The build system supports multiple output formats and boot modes.
+
+## Build System Architecture
+
+The build process consists of several stages:
+
+<Steps>
+  <Step title="Assembly compilation">
+    Compile the bootloader stages with NASM:
+    - `boot.asm` → `boot.bin` (Stage 1, 512 bytes)
+    - `stage2.asm` → `stage2.bin` (Stage 2, 64 sectors)
+    - `isr.asm` → `isr.o` (Interrupt service routines)
+  </Step>
+
+  <Step title="Rust kernel compilation">
+    Build the kernel with cargo:
+    ```bash
+    cargo build --release --target x86_64-portix.json
+    ```
+    The kernel is compiled with `no_std`, panic=abort, and custom linker script.
+  </Step>
+
+  <Step title="Binary extraction">
+    Extract raw binary from ELF:
+    ```bash
+    objcopy -O binary kernel.elf kernel.bin
+    ```
+  </Step>
+
+  <Step title="Disk image creation">
+    Combine bootloader and kernel into disk image:
+    - Write boot sector (LBA 0)
+    - Write stage2 (LBA 1-64)
+    - Write kernel (LBA 65+)
+    - Update stage2 with kernel LBA
+  </Step>
+
+  <Step title="Format conversion">
+    Generate distribution formats:
+    - ISO image (CD-ROM bootable)
+    - VDI image (VirtualBox)
+    - VMDK image (VMware)
+  </Step>
+</Steps>
+
+## Build Script Options
+
+The `build.py` script accepts several command-line arguments:
+
+| Option | Description | Default |
+|--------|-------------|--------|
+| `--mode=MODE` | Output format: `raw`, `iso`, `vdi`, `vmdk`, `ventoy-sim` | `raw` |
+| `--run` | Build and run in QEMU | Not set |
+| `--size=MB` | Disk image size in MB | 8 MB |
+| `--debug` | Enable debug symbols and logging | Not set |
+| `--clean` | Clean build artifacts before building | Not set |
+| `--no-serial` | Disable serial port logging | Not set |
+
+### Build Modes
+
+<Tabs>
+  <Tab title="Raw Disk Image">
+    ```bash
+    python scripts/build.py --mode=raw
+    ```
+    Creates `build/portix.img` - a raw disk image that can be:
+    - Written to USB with `dd`
+    - Booted in QEMU with `-drive format=raw,file=portix.img`
+    - Used with Rufus or Etcher
+  </Tab>
+
+  <Tab title="ISO Image">
+    ```bash
+    python scripts/build.py --mode=iso
+    ```
+    Creates `build/dist/portix.iso` using:
+    - `xorriso` (if available)
+    - `pycdlib` (if installed via pip)
+    - Fallback to raw copy
+
+    The ISO uses El Torito HD emulation for BIOS boot compatibility.
+  </Tab>
+
+  <Tab title="VirtualBox VDI">
+    ```bash
+    python scripts/build.py --mode=vdi
+    ```
+    Creates `build/dist/portix.vdi` compatible with VirtualBox.
+    Requires `VBoxManage` to be installed.
+  </Tab>
+
+  <Tab title="VMware VMDK">
+    ```bash
+    python scripts/build.py --mode=vmdk
+    ```
+    Creates `build/dist/portix.vmdk` compatible with VMware and VirtualBox.
+    Requires `qemu-img` to be installed.
+  </Tab>
+</Tabs>
+
+## Build Process Details
+
+### Assembly Compilation
+
+The bootloader is written in x86 assembly and compiled with NASM:
+
+```bash
+nasm -f bin boot/boot.asm -o build/boot.bin
+nasm -f bin boot/stage2.asm -o build/stage2.bin
+nasm -f elf64 kernel/src/arch/isr.asm -o build/isr.o
+```
+
+<Info>
+The boot sector must be exactly 512 bytes and end with the signature `0x55AA`.
+Stage 2 is limited to 64 sectors (32 KB) to fit before the kernel.
+</Info>
+
+### Kernel Compilation
+
+The kernel uses a custom target specification (`x86_64-portix.json`):
+
+```json
+{
+  "llvm-target": "x86_64-unknown-none-elf",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128",
+  "arch": "x86_64",
+  "os": "none",
+  "panic-strategy": "abort",
+  "disable-redzone": true,
+  "features": "-mmx,-sse,+soft-float",
+  "linker-flavor": "ld.lld",
+  "linker": "rust-lld"
+}
+```
+
+Key features:
+- **no_std**: No standard library
+- **panic=abort**: No unwinding
+- **disable-redzone**: Required for interrupt handlers
+- **soft-float**: No FPU/SSE in kernel space
+
+### Disk Layout
+
+The disk image follows this structure:
+
+```text
+LBA 0:      Boot sector (512 bytes)
+LBA 1-64:   Stage 2 bootloader (32 KB)
+LBA 65+:    Kernel binary
+```
+
+<Warning>
+The kernel start LBA is hardcoded in both `stage2.asm` and `build.py`.
+If you change STAGE2_SECTORS, update both locations.
+</Warning>
+
+## Advanced Build Options
+
+### Debug Build
+
+Enable debug symbols and verbose logging:
+
+```bash
+python scripts/build.py --debug --run
+```
+
+This enables:
+- Debug assertions in Rust code
+- Serial port logging to `build/logs/serial.log`
+- Extended error messages
+
+### Clean Build
+
+Force a complete rebuild:
+
+```bash
+python scripts/build.py --clean --mode=iso
+```
+
+This removes:
+- `build/` directory
+- `target/` directory
+- All cached artifacts
+
+### Custom Disk Size
+
+Specify disk image size:
+
+```bash
+python scripts/build.py --size=16 --mode=raw
+```
+
+<Tip>
+Larger disk images allow for more FAT32 storage space.
+Minimum size is 8 MB to accommodate the kernel.
+</Tip>
+
+## Build Artifacts
+
+After a successful build, you'll find:
+
+```text
+build/
+├── boot.bin           # Stage 1 bootloader
+├── stage2.bin         # Stage 2 bootloader
+├── isr.o              # Interrupt handlers
+├── kernel.bin         # Kernel binary
+├── portix.img         # Raw disk image
+├── dist/
+│   ├── portix.iso     # ISO image
+│   ├── portix.vdi     # VirtualBox image
+│   └── portix.vmdk    # VMware image
+└── logs/
+    ├── build.log      # Build output
+    ├── serial.log     # Serial console output
+    └── debug.log      # Debug messages
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Rust nightly not found">
+    Install Rust nightly and set as default:
+    ```bash
+    rustup toolchain install nightly
+    rustup default nightly
+    rustup component add rust-src --toolchain nightly
+    ```
+  </Accordion>
+
+  <Accordion title="NASM not found">
+    Install NASM assembler:
+    - **Linux**: `sudo apt install nasm`
+    - **macOS**: `brew install nasm`
+    - **Windows**: Download from https://www.nasm.us/
+  </Accordion>
+
+  <Accordion title="objcopy not found">
+    Install LLVM binutils:
+    - **Linux**: `sudo apt install llvm`
+    - **macOS**: `brew install llvm`
+    - **Windows**: Install LLVM from https://llvm.org/
+  </Accordion>
+
+  <Accordion title="Build fails with linker error">
+    Ensure `rust-lld` is available:
+    ```bash
+    rustup component add llvm-tools-preview
+    ```
+  </Accordion>
+
+  <Accordion title="ISO creation fails">
+    Install one of these tools:
+    - `xorriso`: `sudo apt install xorriso`
+    - `pycdlib`: `pip install pycdlib`
+    
+    Or use `--mode=raw` instead.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="vial" href="/development/testing">
+    Learn how to test your build in QEMU and VirtualBox
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/development/contributing">
+    Read the contribution guidelines
+  </Card>
+</CardGroup>
